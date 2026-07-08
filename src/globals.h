@@ -41,13 +41,16 @@ static constexpr unsigned long motorIgnitionPulseDurationMs = 100;
 
 static constexpr bool doFinTestOnCountdown = true;
 
+// VSPI does BNO and BMP
 static constexpr int VSPI_MOSI = 11;
 static constexpr int VSPI_MISO = 13;
 static constexpr int VSPI_CLK  = 12;
-static constexpr int BMP_CS    = 10;
-static constexpr int BNO_CS    = 9;
-static constexpr int BNO_INT   = 18;
-static constexpr int BNO_RST   = 14;
+static constexpr int BMP_CS  = 10;
+static constexpr int BMP_INT = 18;
+static constexpr int BNO_CS  = 9;
+static constexpr int BNO_INT = 8;
+static constexpr int BNO_RST = 14;
+
 
 static constexpr int SD_CS     = 21;
 static constexpr int HSPI_MISO = 37;

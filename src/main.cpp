@@ -557,7 +557,7 @@ void loop() {
     // Process debug CLI commands
      FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
 
-     if (debugMode == true || phase == TRANSPORT || phase == PAD) debugCLI_loop();
+     if (debugMode == true) debugCLI_loop(); // Make debugcli more restrictive, but also easier to do HIL testing
     
      esp_task_wdt_reset();
 

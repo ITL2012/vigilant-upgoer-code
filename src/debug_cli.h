@@ -1,3 +1,5 @@
+// This is AI generated, but it will never be used when in flight because it has to have the var  debugMode = true
+
 #ifndef GUIDANCE_DEBUG_CLI_H
 #define GUIDANCE_DEBUG_CLI_H
 
