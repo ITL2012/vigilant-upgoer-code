@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,15 @@
+# PlatformIO local build files and caches
+.pio/
+.pioenvs/
+.piopm/
+.pialocal/
+
+# VS Code environment configurations
+.vscode/.browse.vc.db
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/
+
+# Operating system files
+.DS_Store
+Thumbs.db

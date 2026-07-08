@@ -1,0 +1,7 @@
+/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/CMakeFiles/flightsim.dir
+/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/CMakeFiles/edit_cache.dir
+/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/CMakeFiles/rebuild_cache.dir
+/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/CMakeFiles/list_install_components.dir
+/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/CMakeFiles/install.dir
+/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/CMakeFiles/install/local.dir
+/home/isaac/Documents/PlatformIO/Projects/260611-123900-esp32-s3-devkitc-1/sim/build/CMakeFiles/install/strip.dir
