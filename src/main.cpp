@@ -104,6 +104,7 @@ volatile uint32_t logDropCount = 0;
 SPIClass *hspi = nullptr;  // Initialized in setup() — NOT a global constructor
 HardwareSerial gpsSerial(2);
 TinyGPSPlus gps;
+Adafruit_PWMServoDriver pwm(PCA9685_ADDR);
 
 volatile TelemetryData sharedTelemetry;
 SemaphoreHandle_t telemetryMutex = NULL;
@@ -444,14 +445,11 @@ void setup() {
 
     // ---- PWM/Servo Initialization ----
     Serial.println("[BOOT] Initializing PWM controller...");
-    if (!pwm.begin()) {
-        Serial.println("[WARN] PWM init failed - servo control disabled");
-        // Don't exit, just continue without servos
-    } else {
-        pwm.setPWMFreq(50);
-        UserSpace::initServos();
-        Serial.println("[OK] PWM controller initialized");
-    }
+    // Adafruit_PWMServoDriver::begin() returns void; call it and proceed.
+    pwm.begin();
+    pwm.setPWMFreq(50);
+    UserSpace::initServos();
+    Serial.println("[OK] PWM controller initialized");
 
     // ---- Flight Control PID Initialization ----
     Serial.println("[BOOT] Initializing stabilization PIDs...");

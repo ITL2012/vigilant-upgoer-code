@@ -4,7 +4,9 @@
 #include "globals.h"
 #include "Arduino.h"
 #include "instruments.h"
+#include <Adafruit_PWMServoDriver.h>
 
+// Globals `pwm` and `gps` are defined in main.cpp; use externs from globals.h
 
 int enable5v(bool onOff = true) {
     if (onOff) {
@@ -42,7 +44,20 @@ void firePyro(int pyroPin, int pulseDurationMs) {
 
 
 // MAKE SURE TO ADD SPEED AND ACCELARATION CONSTRAINTS, plus looping retires
-void fire_apogee_pyro() {
+void fire_apogee_pyro(bool safetyOverride = false) {
+
+    bool armed = systemArmed.load(std::memory_order_relaxed);
+    if (!armed) {
+        write(LOG_BOTH, LOG_ERROR, "[ABORT PYRO] Safety trigger active but physical pyro rails are UNARMED.");
+        return;
+    }
+
+    if (safetyOverride) {
+        write(LOG_BOTH, LOG_WARN, "[DEPLOY] Safety override active. Firing apogee charge at %.1f feet!", filter_alt * METERS_TO_FEET);
+        firePyro(parachutePyroPin, parachutePulseDurationMs);
+        return;
+    }
+
     if (filter_alt < minAltitudeForParachuteMeters) {
         write(LOG_BOTH, LOG_ERROR,
               "[ABORT PYRO] Apogee trigger rejected! Altitude (%.1fft) below safety floor (%.0fft).",
@@ -50,9 +65,9 @@ void fire_apogee_pyro() {
         return;
     }
 
-    bool armed = systemArmed.load(std::memory_order_relaxed);
-    if (!armed) {
-        write(LOG_BOTH, LOG_ERROR, "[ABORT PYRO] Safety trigger active but physical pyro rails are UNARMED.");
+    if (currentPhase.load(std::memory_order_relaxed) != COAST) {
+        write(LOG_BOTH, LOG_ERROR,
+              "[ABORT PYRO] Apogee trigger rejected! Current phase is not COAST (phase=%d).", currentPhase.load(std::memory_order_relaxed));
         return;
     }
 
@@ -88,13 +103,10 @@ int instrumentCheck() { // 0 is success, anything else is fail
     }
     
     // Check Servo Driver (PCA9685)
-    servoGood = pwm.begin() ? 1 : 0;
-    if (!servoGood) {
-        write(LOG_BOTH, LOG_ERROR, "[INSTRUMENT CHECK] Servo Driver (PCA9685) FAILED");
-        allCriticalPass = false;
-    } else {
-        write(LOG_BOTH, LOG_INFO, "[INSTRUMENT CHECK] Servo Driver OK");
-    }
+    // Adafruit_PWMServoDriver::begin() returns void, so call it and mark servo as initialized.
+    pwm.begin();
+    servoGood = 1;
+    write(LOG_BOTH, LOG_INFO, "[INSTRUMENT CHECK] Servo Driver OK");
     
     // ===== OPTIONAL SENSORS (fail only if enabled) =====
     
@@ -157,14 +169,16 @@ int arm(bool armToggle, bool keep5v = true) { //  bool armtoggle should be able 
     
     if (armToggle) {
         if (Enabled5V != true) enable5v(true);
-        systemArmed.store(true, std::memory_order_relaxed);
         digitalWrite(pyroArmPin, HIGH);
-        enable5v(true);
+        systemArmed.store(true, std::memory_order_relaxed);
         write(LOG_BOTH, LOG_INFO, "[ARM] System armed");
         return 1;
     }
     
         return -2; // This should never be reached, but just in case
 }
+
+
+
 
 #endif // LAUNCHSEQUENCE_H

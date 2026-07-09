@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <atomic>
+#include <Adafruit_PWMServoDriver.h>
+#include <TinyGPSPlus.h>
 
 int BMP580good;
 int BNO080good;
@@ -95,7 +97,8 @@ enum FlightPhase {
     READY,
     BOOST,
     COAST,
-    DESCENT
+    DESCENT,
+    LANDED
 };
 
 enum LogDestination {
@@ -190,6 +193,10 @@ extern std::atomic<SystemMode> currentSystemMode;
 extern std::atomic<FlightPhase> currentPhase;
 extern std::atomic<bool> systemArmed;
 extern std::atomic<bool> wifiActive;
+
+// Hardware/global peripheral instances (defined in one .cpp only)
+extern Adafruit_PWMServoDriver pwm;
+extern TinyGPSPlus gps;
 
 extern SemaphoreHandle_t telemetryMutex;
 extern volatile TelemetryData sharedTelemetry;

@@ -71,7 +71,7 @@ static constexpr int GAIN_TABLE_LEN = 5;
 // ADAFRUIT PCA9685 SERVO DRIVER
 // ============================================================================
 
-Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(PCA9685_ADDR);
+extern Adafruit_PWMServoDriver pwm;
 
 namespace UserSpace {
     struct ServoConfig {
