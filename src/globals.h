@@ -38,7 +38,7 @@ static constexpr bool enableAutoMotorIgnition = false;
 static constexpr float motorPyroPin = 999;
 static constexpr unsigned long motorIgnitionPulseDurationMs = 100;
 
-
+static constexpr bool pyroArmPin = 7;
 
 static constexpr bool doFinTestOnCountdown = true;
 

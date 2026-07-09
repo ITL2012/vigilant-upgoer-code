@@ -145,6 +145,8 @@ int arm(bool armToggle) { //  bool armtoggle should be able to arm and disarm, t
     
     if (armToggle) {
         systemArmed.store(true, std::memory_order_relaxed);
+        digitalWrite(pyroArmPin, HIGH);
+        enable5v(true);
         write(LOG_BOTH, LOG_INFO, "[ARM] System armed");
         return 1;
     }
