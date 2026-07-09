@@ -7,11 +7,15 @@
 
 #define METERS_TO_FEET 3.28084f
 
-void enable5v(bool onOff) {
+int enable5v(bool onOff) {
     if (onOff) {
         digitalWrite(Enable5VPin, HIGH);
+        Enabled5V = true;
+        return true;
     } else {
         digitalWrite(Enable5VPin, LOW);
+        Enabled5V = false;
+        return false;
     }
 }
 
@@ -54,7 +58,8 @@ void fire_apogee_pyro() {
     firePyro(parachutePyroPin, parachutePulseDurationMs);
 }
 
-void readyInit() {
+int arm() {
+return true;
 }
 
 #endif // LAUNCHSEQUENCE_H

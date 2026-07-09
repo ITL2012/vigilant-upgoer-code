@@ -14,6 +14,31 @@
 #define APOGEE_VEL_MS       -0.5f      
 #define APOGEE_BUFFER_SIZE   10
 
+void armedAlarm() { // I dont know (but hope) it will stop when READY is off, but maybe not, thatll be fixed if needed
+  // Localized variables that remember their state between calls
+  static unsigned long lastBuzzerAction = 0;
+  static bool buzzerIsOn = false;
+  
+  unsigned long currentMillis = millis();
+  
+  if (buzzerIsOn) {
+    // If the buzzer has been on for 100ms, turn it off
+    if (currentMillis - lastBuzzerAction >= 100) {
+      noTone(BUZZER_PIN);
+      buzzerIsOn = false;
+      lastBuzzerAction = currentMillis;
+    }
+  } else {
+    // If the buzzer has been off for 200ms, turn it back on
+    if (currentMillis - lastBuzzerAction >= 200) {
+      tone(BUZZER_PIN, 1760); // Sharp, high-urgency pitch
+      buzzerIsOn = true;
+      lastBuzzerAction = currentMillis;
+    }
+  }
+}
+
+
 // ============================================================================
 // STRUCTURAL LIMITS
 // ============================================================================
@@ -308,6 +333,7 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
 
             break;
         case READY:
+        armedAlarm();
             if (raw_accel_z > LIFTOFF_ACCEL_G && armed && mode == MODE_ACTIVE_PAD) {
                 currentPhase.store(BOOST, std::memory_order_relaxed);
                 ::filter_alt = 0.0f;
