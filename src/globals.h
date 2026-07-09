@@ -20,6 +20,7 @@ static constexpr bool debugMode = true;
 static constexpr bool enableBuzzer = true;
 static constexpr bool stabilizationMode = true;
 static constexpr bool enforceGPSLock = false;
+static constexpr bool enforceSDCard = true;
 static constexpr bool enableWaypointGuidance = false;
 
 static constexpr int pyro1Pin = 999;
@@ -80,6 +81,8 @@ static constexpr float APOGEE_VEL_THRESHOLD = -0.5f;
 static constexpr unsigned long IMU_TIMEOUT_MS = 500;
 static constexpr float DEPLOYMENT_ALTITUDE = 50.0f;
 static constexpr unsigned long WDT_TIMEOUT_S = 5;
+
+static constexpr double METERS_TO_FEET = 3.280839895013123;
 
 enum SystemMode {
     MODE_TRANSPORT,
