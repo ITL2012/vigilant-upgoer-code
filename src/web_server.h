@@ -24,7 +24,6 @@ extern volatile float servoOverrideAngles[8];
 extern char serialLogBuffer[];
 extern volatile uint16_t serialLogHead;
 extern volatile uint16_t serialLogTail;
-static constexpr size_t SERIAL_LOG_BUF_SIZE = 4096;
 
 // ============================================================================
 // READY-PHASE MINIMAL HTML PAGE

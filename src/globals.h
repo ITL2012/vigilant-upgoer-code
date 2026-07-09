@@ -78,6 +78,7 @@ static const char LOG_FILE_PATH[] = "/flight_log.csv";
 static const char SYSTEM_LOG_FILE_PATH[] = "/system_log.txt";
 static constexpr int LOG_QUEUE_LEN = 500;
 static constexpr size_t LOG_MESSAGE_BUFFER_SIZE = 256;
+static constexpr size_t SERIAL_LOG_BUF_SIZE = 4096;
 static constexpr float LAUNCH_ACCEL_THRESHOLD = 25.0f;
 static constexpr float APOGEE_VEL_THRESHOLD = -0.5f;
 static constexpr unsigned long IMU_TIMEOUT_MS = 500;
