@@ -14,30 +14,6 @@
 #define APOGEE_VEL_MS       -0.5f      
 #define APOGEE_BUFFER_SIZE   10
 
-void armedAlarm() { // I dont know (but hope) it will stop when READY is off, but maybe not, thatll be fixed if needed
-  // Localized variables that remember their state between calls
-  static unsigned long lastBuzzerAction = 0;
-  static bool buzzerIsOn = false;
-  
-  unsigned long currentMillis = millis();
-  
-  if (buzzerIsOn) {
-    // If the buzzer has been on for 100ms, turn it off
-    if (currentMillis - lastBuzzerAction >= 100) {
-      noTone(BUZZER_PIN);
-      buzzerIsOn = false;
-      lastBuzzerAction = currentMillis;
-    }
-  } else {
-    // If the buzzer has been off for 200ms, turn it back on
-    if (currentMillis - lastBuzzerAction >= 200) {
-      tone(BUZZER_PIN, 1760); // Sharp, high-urgency pitch
-      buzzerIsOn = true;
-      lastBuzzerAction = currentMillis;
-    }
-  }
-}
-
 
 // ============================================================================
 // STRUCTURAL LIMITS
@@ -312,6 +288,10 @@ FlightPhase flight_core_get_phase(void) {
     return currentPhase.load(std::memory_order_relaxed);
 }
 
+uint32_t landing_start_ms = 0;  // Stores when landing conditions were first met
+bool tracking_landing = false;  // Tracks if the timer is actively running
+
+
 void process_flight_state_machine(float raw_accel_z, float filter_alt) {
     static uint16_t apogee_counter = 0;
     static float max_altitude = 0.0f;
@@ -333,7 +313,6 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
 
             break;
         case READY:
-        armedAlarm();
             if (raw_accel_z > LIFTOFF_ACCEL_G && armed && mode == MODE_ACTIVE_PAD) {
                 currentPhase.store(BOOST, std::memory_order_relaxed);
                 ::filter_alt = 0.0f;
@@ -362,7 +341,34 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
             break;
 
         case DESCENT:
-            break;
+        uint32_t landing_start_ms = 0;  // Stores when landing conditions were first met
+        bool tracking_landing = false;  // Tracks if the timer is actively running
+
+            if (V_z < APOGEE_VEL_MS) {
+                apogee_counter++;
+                if (apogee_counter >= APOGEE_BUFFER_SIZE) {
+                    currentPhase.store(DESCENT, std::memory_order_relaxed);
+                    write(LOG_BOTH, LOG_INFO, "[PHASE] COAST -> DESCENT (Apogee Detected)");
+                }
+            } else {
+                apogee_counter = 0;
+            }
+
+            if (filter_alt < 5.0f && !tracking_landing) {
+                landing_start_ms = millis();
+                tracking_landing = true;
+            }
+
+            if (tracking_landing && filter_alt < 5.0f) {
+                if (millis() - landing_start_ms >= 3000) {
+                    currentPhase.store(TRANSPORT, std::memory_order_relaxed);
+                    write(LOG_BOTH, LOG_INFO, "[PHASE] DESCENT -> TRANSPORT (Landing Confirmed)");
+                    tracking_landing = false;
+                }
+            } else {
+                tracking_landing = false;
+            }
+        break;
     }
 }
 
