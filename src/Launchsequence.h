@@ -6,14 +6,16 @@
 #include "instruments.h"
 
 
-int enable5v(bool onOff) {
+int enable5v(bool onOff = true) {
     if (onOff) {
         digitalWrite(Enable5VPin, HIGH);
         Enabled5V = true;
+        write(LOG_BOTH, LOG_INFO, "5v Enabled");
         return true;
     } else {
         digitalWrite(Enable5VPin, LOW);
         Enabled5V = false;
+        write(LOG_BOTH, LOG_INFO, "5v Disabled");
         return false;
     }
 }
@@ -130,11 +132,21 @@ int instrumentCheck() { // 0 is success, anything else is fail
     }
 }
 
-int arm(bool armToggle) { //  bool armtoggle should be able to arm and disarm, true for arm
+int arm(bool armToggle, bool keep5v = true) { //  bool armtoggle should be able to arm and disarm, true for arm
 
     if (!armToggle) {
-        systemArmed.store(false, std::memory_order_relaxed);
-        write(LOG_BOTH, LOG_INFO, "[ARM] System disarmed");
+
+        if (keep5v) {
+            systemArmed.store(false, std::memory_order_relaxed);
+            write(LOG_BOTH, LOG_INFO, "[ARM] System disarmed");
+        }
+
+        if (!keep5v) {
+
+            enable5v(false);
+            systemArmed.store(false, std::memory_order_relaxed);
+            write(LOG_BOTH, LOG_INFO, "[ARM] System disarmed with 5v disabled"); 
+        }
         return 0;
     }
 
@@ -144,6 +156,7 @@ int arm(bool armToggle) { //  bool armtoggle should be able to arm and disarm, t
     }
     
     if (armToggle) {
+        if (Enabled5V != true) enable5v(true);
         systemArmed.store(true, std::memory_order_relaxed);
         write(LOG_BOTH, LOG_INFO, "[ARM] System armed");
         return 1;
