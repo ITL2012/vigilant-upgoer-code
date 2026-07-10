@@ -106,6 +106,27 @@ void disarmChime() {
     playTone(880, 300); delay(350);
 }
 
+// RECOVERY beacon - call once to start, then call recoveryNoise() each loop
+static bool recoveryBeaconActive = false;
+
+void recoveryBeaconStart() {
+    recoveryBeaconActive = true;
+    write(LOG_SERIAL, LOG_INFO, "[BUZZER] Recovery beacon started");
+}
+
+void recoveryBeaconStop() {
+    recoveryBeaconActive = false;
+    noTone(BUZZER_PIN);
+    write(LOG_SERIAL, LOG_INFO, "[BUZZER] Recovery beacon stopped");
+}
+
+// Call this each loop iteration when in RECOVERY phase
+void recoveryBeaconUpdate() {
+    if (recoveryBeaconActive) {
+        recoveryNoise();
+    }
+}
+
 void modeChangeChime() {
     playTone(587, 80); delay(100);
     playTone(880, 80); delay(100);

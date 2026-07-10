@@ -354,7 +354,7 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
             }
             break;
 
-        case DESCENT:
+        case DESCENT: {
             uint32_t landing_start_ms = 0;
             bool tracking_landing = false;
 
@@ -375,14 +375,30 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
 
             if (tracking_landing && filter_alt < 5.0f) {
                 if (millis() - landing_start_ms >= 3000) {
-                    currentPhase.store(TRANSPORT, std::memory_order_relaxed);
-                    write(LOG_BOTH, LOG_INFO, "[PHASE] DESCENT -> TRANSPORT (Landing Confirmed)");
+                    // Transition to RECOVERY - disarm, kill 5V, start beacon
+                    currentPhase.store(RECOVERY, std::memory_order_relaxed);
+                    systemArmed.store(false, std::memory_order_relaxed);
+                    enable5v(false);
+                    recoveryBeaconStart();
+                    write(LOG_BOTH, LOG_INFO, "[PHASE] DESCENT -> RECOVERY (Landing Confirmed)");
                     tracking_landing = false;
                 }
             } else {
                 tracking_landing = false;
             }
-        break;
+        } break;
+
+        case RECOVERY:
+            // RECOVERY phase: wait for operator confirmation via web UI
+            // WiFi should be re-enabled, recovery beacon active
+            // Log at 1 Hz
+            static uint32_t last_recovery_log = 0;
+            if (millis() - last_recovery_log >= 1000) {
+                last_recovery_log = millis();
+                write(LOG_SERIAL, LOG_INFO, "[RECOVERY] Alt=%.2f GPS=%.6f,%.6f",
+                      filter_alt, sharedTelemetry.latitude, sharedTelemetry.longitude);
+            }
+            break;
     }
 }
 
@@ -423,6 +439,9 @@ void updateRocketFusion(float lin_ax, float lin_ay, float lin_az,
             break;
         case DESCENT:
             alpha = 0.900f;
+            break;
+        case RECOVERY:
+            alpha = 0.80f; // Heavily weight barometer when stationary
             break;
     }
 

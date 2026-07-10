@@ -77,7 +77,7 @@ static constexpr int PWM_NEUTRAL = 307;
 static constexpr int PWM_RANGE   = 100;
 static const char LOG_FILE_PATH[] = "/flight_log.csv";
 static const char SYSTEM_LOG_FILE_PATH[] = "/system_log.txt";
-static constexpr int LOG_QUEUE_LEN = 500;
+static constexpr int LOG_QUEUE_LEN = 5000;
 static constexpr size_t LOG_MESSAGE_BUFFER_SIZE = 256;
 static constexpr size_t SERIAL_LOG_BUF_SIZE = 4096;
 static constexpr size_t LOG_CACHE_SIZE = 8192;
@@ -102,7 +102,7 @@ enum FlightPhase {
     BOOST,
     COAST,
     DESCENT,
-    LANDED
+    RECOVERY
 };
 
 enum LogDestination {
@@ -214,7 +214,7 @@ extern float qnh_pressure;
 extern unsigned long lastMicros;
 extern unsigned long lastLogTime;
 extern std::atomic<unsigned long> lastIMUReport_ms;
-extern volatile uint32_t logDropCount;
+extern std::atomic<uint32_t> logDropCount;
 
 extern bool sdReady;
 

@@ -217,10 +217,10 @@ void SDInit() {
         return;
     }
 
-    if (!SD.exists(LOG_FILE_PATH)) {
+if (!SD.exists(LOG_FILE_PATH)) {
         File file = SD.open(LOG_FILE_PATH, FILE_WRITE);
         if (file) {
-            file.println("timestamp_ms,roll,pitch,yaw,raw_alt,filtered_alt,vel_z,"
+            file.println("timestamp_ms,epoch_ms,roll,pitch,yaw,raw_alt,filtered_alt,vel_z,"
                          "acc_x,acc_y,acc_z,phase,"
                          "servo0,servo1,servo2,servo3,servo4,servo5,servo6,servo7,"
                          "pid0,pid1,pid2,pid3,pid4,pid5,pid6,pid7,"
@@ -247,10 +247,10 @@ void pushLogPacket(const LogPacket &packet) {
     }
 
     if (xQueueSend(sdLogQueue, &packet, 0) != pdTRUE) {
-        logDropCount++;
+        uint32_t drops = logDropCount.fetch_add(1, std::memory_order_relaxed) + 1;
         UBaseType_t spaces = uxQueueSpacesAvailable(sdLogQueue);
         UBaseType_t queued = uxQueueMessagesWaiting(sdLogQueue);
-        Serial.printf("[WARN] Log drop #%u: queue full (spaces=%u, queued=%u). packet.ts=%u\n", logDropCount, (unsigned)spaces, (unsigned)queued, packet.timestamp_ms);
+        Serial.printf("[WARN] Log drop #%u: queue full (spaces=%u, queued=%u). packet.ts=%u\n", drops, (unsigned)spaces, (unsigned)queued, packet.timestamp_ms);
     }
 }
 
@@ -286,52 +286,97 @@ void SDWriterTask(void *pvParameters) {
     esp_task_wdt_add(NULL);
 
     LogPacket packet;
+    File logFile;
+    bool fileOpen = false;
+
+    // Helper: safely (re)open log file
+    auto openLogFile = [&]() -> bool {
+        if (fileOpen) {
+            logFile.close();
+            fileOpen = false;
+        }
+        logFile = SD.open(LOG_FILE_PATH, FILE_APPEND);
+        if (logFile) {
+            fileOpen = true;
+            return true;
+        }
+        return false;
+    };
+
+    // Initial open
+    if (!openLogFile()) {
+        write(LOG_SERIAL, LOG_ERROR, "[SDWriter] Failed to open log file at startup");
+        sdReady = false;
+    }
 
     for (;;) {
+        // Block up to 1s for a packet
         if (xQueueReceive(sdLogQueue, &packet, pdMS_TO_TICKS(1000)) == pdTRUE) {
             if (!sdReady) {
-                continue;
+                continue;  // packet dropped, will be counted by pushLogPacket
             }
 
-            File file = SD.open(LOG_FILE_PATH, FILE_APPEND);
-            if (file) {
-                file.printf("%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,"
-                            "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
-                            "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                            "%.4f,%.4f,%.4f,"
-                            "%.2f,%.4f,%.4f,"
-                            "%.4f,%.4f,%.4f,%.4f,"
-                            "%.2f,%.2f,%.6f,%u\n",
-                    packet.timestamp_ms,
-                    packet.roll, packet.pitch, packet.yaw,
-                    packet.raw_alt, packet.filtered_alt, packet.vel_z,
-                    packet.accel_x, packet.accel_y, packet.accel_z,
-                    packet.current_phase,
-
-                    packet.servo0, packet.servo1, packet.servo2, packet.servo3,
-                    packet.servo4, packet.servo5, packet.servo6, packet.servo7,
-
-                    packet.pid0, packet.pid1, packet.pid2, packet.pid3,
-                    packet.pid4, packet.pid5, packet.pid6, packet.pid7,
-
-                    packet.gain_kp, packet.gain_ki, packet.gain_kd,
-
-                    packet.airspeed, packet.kalman_P, packet.baro_alpha,
-
-                    packet.qx, packet.qy, packet.qz, packet.qw,
-
-                    packet.baro_pressure, packet.baro_temp, packet.dt,
-                    (uint32_t)logDropCount);
-                file.close();
-            } else {
-                sdWriteFailures++;
-                SD.end();
-                if (SD.begin(SD_CS, *hspi)) {
-                    sdReady = true;
+            // Ensure file is open; attempt recovery if needed
+            if (!fileOpen) {
+                if (!openLogFile()) {
+                    sdWriteFailures++;
+                    // Full SD re-init attempt
+                    SD.end();
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    if (SD.begin(SD_CS, *hspi)) {
+                        sdReady = true;
+                        if (!openLogFile()) {
+                            sdReady = false;
+                            continue;
+                        }
+                    } else {
+                        sdReady = false;
+                        continue;
+                    }
+                } else {
+                    sdReady = false;
+                    continue;
                 }
+            }
+
+            // Write the packet
+            logFile.printf("%u,%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,"
+                           "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+                           "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                           "%.4f,%.4f,%.4f,"
+                           "%.2f,%.4f,%.4f,"
+                           "%.4f,%.4f,%.4f,%.4f,"
+                           "%.2f,%.2f,%.6f,%u\n",
+                packet.timestamp_ms,
+                packet.epoch_ms,
+                packet.roll, packet.pitch, packet.yaw,
+                packet.raw_alt, packet.filtered_alt, packet.vel_z,
+                packet.accel_x, packet.accel_y, packet.accel_z,
+                packet.current_phase,
+
+                packet.servo0, packet.servo1, packet.servo2, packet.servo3,
+                packet.servo4, packet.servo5, packet.servo6, packet.servo7,
+
+                packet.pid0, packet.pid1, packet.pid2, packet.pid3,
+                packet.pid4, packet.pid5, packet.pid6, packet.pid7,
+
+                packet.gain_kp, packet.gain_ki, packet.gain_kd,
+
+                packet.airspeed, packet.kalman_P, packet.baro_alpha,
+
+                packet.qx, packet.qy, packet.qz, packet.qw,
+
+                packet.baro_pressure, packet.baro_temp, packet.dt,
+                logDropCount.load(std::memory_order_relaxed));
+
+            // Flush strategy: only when queue drains to avoid I/O blocking during burst
+            UBaseType_t remaining = uxQueueMessagesWaiting(sdLogQueue);
+            if (remaining == 0) {
+                logFile.flush();
             }
         }
 
+        // Periodic flush + watchdog
         esp_task_wdt_reset();
     }
 }

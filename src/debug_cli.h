@@ -55,8 +55,9 @@ void debugCLI_printStatus() {
     const char* modeStr = (mode == MODE_TRANSPORT) ? "TRANSPORT" : 
                           (mode == MODE_PAD) ? "PAD" : "ACTIVE_PAD";
     Serial.printf("Mode: %s\n", modeStr);
-    Serial.printf("Phase: %d (0=TRANSPORT, 1=PAD, 2=READY, 3=BOOST, 4=COAST, 5=DESCENT)\n", 
-                  (int)currentPhase.load(std::memory_order_relaxed));
+    const char* phaseNames[] = {"TRANSPORT","PAD","READY","BOOST","COAST","DESCENT","RECOVERY"};
+    FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
+    Serial.printf("Phase: %s (%d)\n", phaseNames[phase], (int)phase);
     Serial.printf("Armed: %s\n", systemArmed.load(std::memory_order_relaxed) ? "YES" : "NO");
     
     Serial.println("\n=== INSTRUMENTS ===");

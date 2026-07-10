@@ -56,7 +56,7 @@ SemaphoreHandle_t logCacheMutex = NULL;
 unsigned long lastMicros = 0;
 unsigned long lastLogTime = 0;
 std::atomic<unsigned long> lastIMUReport_ms(0);
-volatile uint32_t logDropCount = 0;
+std::atomic<uint32_t> logDropCount(0);
 
 SPIClass *hspi = nullptr;  // Initialized in setup() — NOT a global constructor
 HardwareSerial gpsSerial(2);
@@ -233,7 +233,6 @@ void setup() {
     Serial.print("> ");
     }
 }
-
 void loop() {
     // Process debug CLI commands
      FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
@@ -254,8 +253,21 @@ void loop() {
 
     SystemMode mode = currentSystemMode.load(std::memory_order_relaxed);
 
-    if (mode == MODE_ACTIVE_PAD) armedAlarm(); // Trigger the
+    // Armed alarm only in ACTIVE_PAD (READY/flight phases)
+    if (mode == MODE_ACTIVE_PAD) armedAlarm();
 
+    // Recovery beacon runs independently of mode
+    if (phase == RECOVERY) {
+        recoveryBeaconUpdate();
+    }
+
+    // Determine logging interval based on mode/phase
+    int logIntervalMs = 1000; // default 1 Hz for TRANSPORT, PAD, RECOVERY
+    if (mode == MODE_ACTIVE_PAD) {
+        logIntervalMs = 10; // 100 Hz for ACTIVE_PAD (READY/flight)
+    }
+
+    // Sensor reading & fusion runs in PAD and ACTIVE_PAD modes
     if (mode == MODE_PAD || mode == MODE_ACTIVE_PAD) {
         raw_altitude = readBaroAltitude();
 
@@ -280,6 +292,14 @@ void loop() {
             shutdownWiFiNetwork();
         }
 
+        // Re-enable WiFi in RECOVERY phase
+        if (phase == RECOVERY && !wifiActive.load(std::memory_order_relaxed)) {
+            // WiFi was shut down at BOOST, restart it for recovery
+            wifiActive.store(true, std::memory_order_relaxed);
+            // Note: WifiServerTask will re-create the server
+            write(LOG_BOTH, LOG_INFO, "[RECOVERY] WiFi re-enabled for recovery");
+        }
+
         if (phase == PAD || phase == READY) {
             userPreFlightLoop(dt);
 
@@ -293,6 +313,7 @@ void loop() {
         } else if (phase == BOOST || phase == COAST) {
             userFlightStabilizationLoop(roll, pitch, yaw, V_z, dt);
         }
+        // DESCENT and RECOVERY: no active stabilization, no servo override
 
         if (gps.location.isUpdated() && gps.speed.isValid()) {
             airspeedFilter.updateGPS(gps.speed.mps(), true);
@@ -306,61 +327,61 @@ void loop() {
 
     updateSharedTelemetry(roll, pitch, yaw, raw_altitude, filter_alt, V_z);
 
-    if (mode == MODE_PAD || mode == MODE_ACTIVE_PAD) {
-        unsigned long now = millis();
-        if (now - lastLogTime >= 10) {
-            lastLogTime = now;
+    // Logging at appropriate rate
+    unsigned long now = millis();
+    if (now - lastLogTime >= logIntervalMs) {
+        lastLogTime = now;
 
-            FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
-            LogPacket packet;
-            packet.timestamp_ms = now;
-            packet.roll = roll;
-            packet.pitch = pitch;
-            packet.yaw = yaw;
-            packet.raw_alt = raw_altitude;
-            packet.filtered_alt = filter_alt;
-            packet.vel_z = V_z;
-            packet.accel_x = lin_ax;
-            packet.accel_y = lin_ay;
-            packet.accel_z = lin_az;
-            packet.current_phase = static_cast<uint8_t>(phase);
+        FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
+        LogPacket packet;
+        packet.timestamp_ms = now;
+        packet.epoch_ms = systemBaseEpochMs.load(std::memory_order_relaxed) + now;
+        packet.roll = roll;
+        packet.pitch = pitch;
+        packet.yaw = yaw;
+        packet.raw_alt = raw_altitude;
+        packet.filtered_alt = filter_alt;
+        packet.vel_z = V_z;
+        packet.accel_x = lin_ax;
+        packet.accel_y = lin_ay;
+        packet.accel_z = lin_az;
+        packet.current_phase = static_cast<uint8_t>(phase);
 
-            packet.servo0 = latestServoAngles[0];
-            packet.servo1 = latestServoAngles[1];
-            packet.servo2 = latestServoAngles[2];
-            packet.servo3 = latestServoAngles[3];
-            packet.servo4 = latestServoAngles[4];
-            packet.servo5 = latestServoAngles[5];
-            packet.servo6 = latestServoAngles[6];
-            packet.servo7 = latestServoAngles[7];
+        packet.servo0 = latestServoAngles[0];
+        packet.servo1 = latestServoAngles[1];
+        packet.servo2 = latestServoAngles[2];
+        packet.servo3 = latestServoAngles[3];
+        packet.servo4 = latestServoAngles[4];
+        packet.servo5 = latestServoAngles[5];
+        packet.servo6 = latestServoAngles[6];
+        packet.servo7 = latestServoAngles[7];
 
-            packet.pid0 = latestPIDOutputs[0];
-            packet.pid1 = latestPIDOutputs[1];
-            packet.pid2 = latestPIDOutputs[2];
-            packet.pid3 = latestPIDOutputs[3];
-            packet.pid4 = latestPIDOutputs[4];
-            packet.pid5 = latestPIDOutputs[5];
-            packet.pid6 = latestPIDOutputs[6];
-            packet.pid7 = latestPIDOutputs[7];
+        packet.pid0 = latestPIDOutputs[0];
+        packet.pid1 = latestPIDOutputs[1];
+        packet.pid2 = latestPIDOutputs[2];
+        packet.pid3 = latestPIDOutputs[3];
+        packet.pid4 = latestPIDOutputs[4];
+        packet.pid5 = latestPIDOutputs[5];
+        packet.pid6 = latestPIDOutputs[6];
+        packet.pid7 = latestPIDOutputs[7];
 
-            packet.gain_kp = latestActiveGains[0];
-            packet.gain_ki = latestActiveGains[1];
-            packet.gain_kd = latestActiveGains[2];
+        packet.gain_kp = latestActiveGains[0];
+        packet.gain_ki = latestActiveGains[1];
+        packet.gain_kd = latestActiveGains[2];
 
-            packet.airspeed   = latestAirspeed;
-            packet.kalman_P   = latestKalmanP;
-            packet.baro_alpha = latestBaroAlpha;
+        packet.airspeed   = latestAirspeed;
+        packet.kalman_P   = latestKalmanP;
+        packet.baro_alpha = latestBaroAlpha;
 
-            packet.qx = qx;
-            packet.qy = qy;
-            packet.qz = qz;
-            packet.qw = qw;
+        packet.qx = qx;
+        packet.qy = qy;
+        packet.qz = qz;
+        packet.qw = qw;
 
-            packet.baro_pressure = latestBaroPressure;
-            packet.baro_temp     = latestBaroTemp;
-            packet.dt            = latestDt;
+        packet.baro_pressure = latestBaroPressure;
+        packet.baro_temp     = latestBaroTemp;
+        packet.dt            = latestDt;
 
-            pushLogPacket(packet);
-        }
+        pushLogPacket(packet);
     }
 }

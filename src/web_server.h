@@ -548,6 +548,30 @@ void handleDeleteLog() {
     }
 }
 
+void handleConfirmRecovery() {
+    if (xSemaphoreTake(webServerMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
+        if (phase == RECOVERY) {
+            currentPhase.store(TRANSPORT, std::memory_order_relaxed);
+            currentSystemMode.store(MODE_TRANSPORT, std::memory_order_relaxed);
+            systemArmed.store(false, std::memory_order_relaxed);
+            servoOverrideActive = false;
+            recoveryBeaconStop();
+            xSemaphoreGive(webServerMutex);
+            playTone(587, 80); delay(100);
+            playTone(880, 80); delay(100);
+            playTone(1175, 150); delay(180);
+            serverPtr->send(200, "text/plain", "RECOVERY CONFIRMED -> TRANSPORT");
+            write(LOG_BOTH, LOG_INFO, "[RECOVERY] Operator confirmed recovery -> TRANSPORT");
+            return;
+        }
+        xSemaphoreGive(webServerMutex);
+    }
+    serverPtr->send(403, "text/plain", "NOT IN RECOVERY PHASE");
+}
+
+// ============================================================================
+// DYNAMIC ROUTE REGISTRATION
 // ============================================================================
 // DYNAMIC ROUTE REGISTRATION
 // ============================================================================
@@ -582,6 +606,7 @@ void registerFullRoutes() {
     serverPtr->on("/disarm", HTTP_POST, handleDisarm);
     serverPtr->on("/launch", HTTP_POST, handleLaunch);
     serverPtr->on("/set_mode", HTTP_POST, handleSetSystemMode);
+    serverPtr->on("/confirm_recovery", HTTP_POST, handleConfirmRecovery);
     serverPtr->on("/servo", HTTP_POST, handleSetServo);
     serverPtr->on("/servo_all", HTTP_POST, handleSetAllServos);
     serverPtr->on("/servo_release", HTTP_POST, handleReleaseServos);
@@ -589,6 +614,7 @@ void registerFullRoutes() {
     serverPtr->on("/serial_log", HTTP_GET, handleSerialLog);
     serverPtr->on("/download_log", HTTP_GET, handleDownloadLog);
     serverPtr->on("/delete_log", HTTP_POST, handleDeleteLog);
+    serverPtr->on("/confirm_recovery", HTTP_POST, handleConfirmRecovery);
     ElegantOTA.begin(serverPtr);
     Serial.println("[WIFI] Full dashboard routes registered");
 }
@@ -649,6 +675,20 @@ void WifiServerTask(void *pvParameters) {
                 serverPtr->begin();
             } else if (prevPhase == READY && curPhase == PAD) {
                 Serial.println("[WIFI] READY -> PAD (abort): restoring full dashboard");
+                delete serverPtr;
+                serverPtr = new WebServer(80);
+                registerFullRoutes();
+                serverPtr->begin();
+            } else if (curPhase == RECOVERY) {
+                // Re-enable WiFi and restore full dashboard for recovery confirmation
+                Serial.println("[WIFI] -> RECOVERY: re-enabling AP and full dashboard");
+                if (!wifiActive.load(std::memory_order_relaxed)) {
+                    wifiActive.store(true, std::memory_order_relaxed);
+                    WiFi.softAP(AP_SSID, AP_PASSWORD);
+                    IPAddress IP = WiFi.softAPIP();
+                    Serial.print("[WIFI] Recovery AP Live! IP: ");
+                    Serial.println(IP);
+                }
                 delete serverPtr;
                 serverPtr = new WebServer(80);
                 registerFullRoutes();
