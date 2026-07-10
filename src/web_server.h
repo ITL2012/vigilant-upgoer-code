@@ -290,10 +290,19 @@ void handleSetSystemMode() {
         serverPtr->send(400, "text/plain", "Missing val parameter");
         return;
     }
+
+    // Prevent mode changes during flight
+    FlightPhase phaseNow = currentPhase.load(std::memory_order_relaxed);
+    if (phaseNow == BOOST || phaseNow == COAST || phaseNow == DESCENT) {
+        serverPtr->send(403, "text/plain", "CANNOT CHANGE MODE DURING FLIGHT");
+        return;
+    }
+
     String modeVal = serverPtr->arg("val");
     if (modeVal == "transport") {
         if (xSemaphoreTake(webServerMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             currentSystemMode.store(MODE_TRANSPORT, std::memory_order_relaxed);
+            currentPhase.store(TRANSPORT, std::memory_order_relaxed);
             systemArmed.store(false, std::memory_order_relaxed);
             servoOverrideActive = false;
             xSemaphoreGive(webServerMutex);
@@ -302,21 +311,37 @@ void handleSetSystemMode() {
         playTone(880, 80); delay(100);
         playTone(1175, 150); delay(180);
         serverPtr->send(200, "text/plain", "MODE: TRANSPORT");
-    } else if (modeVal == "active_pad") {
-        if (initInstruments()) {
-            calibrateGroundAltitude();
-            if (xSemaphoreTake(webServerMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                currentSystemMode.store(MODE_ACTIVE_PAD, std::memory_order_relaxed);
-                xSemaphoreGive(webServerMutex);
+    } else if (modeVal == "pad") {
+        // Initialize instruments if not already done
+        if (!bnoInitialized || !bmpInitialized) {
+            if (!initInstruments()) {
+                playTone(200, 500);
+                serverPtr->send(500, "text/plain", "INSTRUMENT INITIALIZATION FAILED");
+                return;
             }
-            playTone(587, 80); delay(100);
-            playTone(880, 80); delay(100);
-            playTone(1175, 150); delay(180);
-            serverPtr->send(200, "text/plain", "MODE: ACTIVE_PAD");
-        } else {
-            playTone(200, 500);
-            serverPtr->send(500, "text/plain", "INSTRUMENT INITIALIZATION FAILED");
+            calibrateGroundAltitude();
         }
+        if (xSemaphoreTake(webServerMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            currentSystemMode.store(MODE_PAD, std::memory_order_relaxed);
+            currentPhase.store(PAD, std::memory_order_relaxed);
+            systemArmed.store(false, std::memory_order_relaxed);
+            servoOverrideActive = false;
+            xSemaphoreGive(webServerMutex);
+        }
+        playTone(587, 80); delay(100);
+        playTone(880, 80); delay(100);
+        playTone(1175, 150); delay(180);
+        serverPtr->send(200, "text/plain", "MODE: PAD");
+    } else if (modeVal == "active_pad") {
+        if (xSemaphoreTake(webServerMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            currentSystemMode.store(MODE_ACTIVE_PAD, std::memory_order_relaxed);
+            currentPhase.store(READY, std::memory_order_relaxed);
+            xSemaphoreGive(webServerMutex);
+        }
+        playTone(587, 80); delay(100);
+        playTone(880, 80); delay(100);
+        playTone(1175, 150); delay(180);
+        serverPtr->send(200, "text/plain", "MODE: ACTIVE_PAD");
     } else {
         serverPtr->send(400, "text/plain", "Unknown mode");
     }
@@ -531,21 +556,21 @@ void handleLaunch() {
     if (xSemaphoreTake(webServerMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         SystemMode mode = currentSystemMode.load(std::memory_order_relaxed);
         FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
-        if (mode == MODE_ACTIVE_PAD && (phase == PAD || phase == READY)) {
+        if (mode == MODE_ACTIVE_PAD) {
+            // Already in ACTIVE_PAD (READY phase)
             systemArmed.store(true, std::memory_order_relaxed);
             servoOverrideActive = false;
-            currentPhase.store(READY, std::memory_order_relaxed);
             xSemaphoreGive(webServerMutex);
 
             playTone(880, 150); delay(180);
             playTone(1760, 400); delay(450);
 
-            serverPtr->send(200, "text/plain", "READY PHASE - AWAITING LAUNCH");
+            serverPtr->send(200, "text/plain", "ALREADY IN ACTIVE_PAD (READY)");
             return;
         }
         xSemaphoreGive(webServerMutex);
     }
-    serverPtr->send(403, "text/plain", "CANNOT LAUNCH: NOT IN ACTIVE PAD OR ALREADY IN FLIGHT");
+    serverPtr->send(403, "text/plain", "CANNOT LAUNCH: MUST BE IN ACTIVE_PAD MODE");
 }
 
 

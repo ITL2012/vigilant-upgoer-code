@@ -295,6 +295,7 @@ bool tracking_landing = false;  // Tracks if the timer is actively running
 void process_flight_state_machine(float raw_accel_z, float filter_alt) {
     static uint16_t apogee_counter = 0;
     static float max_altitude = 0.0f;
+    static uint32_t last_pad_log_ms = 0;
 
     if (filter_alt > max_altitude) {
         max_altitude = filter_alt;
@@ -306,13 +307,26 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
 
     switch (current) {
         case TRANSPORT:
-            // Complete software lockout
+            // Complete software lockout - sensors off, no fusion
             break;
 
         case PAD:
-
+            // Pre-flight sensor validation mode
+            // Runs at MODE_PAD - sensors active, fusion running, servos centered
+            // Log sensor status periodically
+            if (millis() - last_pad_log_ms >= 5000) {
+                last_pad_log_ms = millis();
+                write(LOG_SERIAL, LOG_INFO, "[PAD] Phase=PAD Mode=PAD | Alt=%.2f Vz=%.2f IMU=%s BARO=%s GPS=%s",
+                      filter_alt, V_z,
+                      bnoInitialized ? "OK" : "FAIL",
+                      bmpInitialized ? "OK" : "FAIL",
+                      sharedTelemetry.gpsUpdated ? "OK" : "NO_FIX");
+            }
+            // PAD -> READY transition is MANUAL via web interface (switch to ACTIVE_PAD)
             break;
+
         case READY:
+            // Active pad / armed - awaiting launch detect
             if (raw_accel_z > LIFTOFF_ACCEL_G && armed && mode == MODE_ACTIVE_PAD) {
                 currentPhase.store(BOOST, std::memory_order_relaxed);
                 ::filter_alt = 0.0f;
@@ -330,19 +344,19 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
             if (V_z <= APOGEE_VEL_MS && (max_altitude - filter_alt > 1.5f)) {
                 apogee_counter++;
             } else {
-                if (apogee_counter > 0) apogee_counter--; 
+                if (apogee_counter > 0) apogee_counter--;
             }
 
             if (apogee_counter >= APOGEE_BUFFER_SIZE) {
                 currentPhase.store(DESCENT, std::memory_order_relaxed);
                 write(LOG_BOTH, LOG_INFO, "[PHASE] COAST -> DESCENT (Apogee Confirmed)");
-                fire_apogee_pyro(); 
+                fire_apogee_pyro();
             }
             break;
 
         case DESCENT:
-        uint32_t landing_start_ms = 0;  // Stores when landing conditions were first met
-        bool tracking_landing = false;  // Tracks if the timer is actively running
+            uint32_t landing_start_ms = 0;
+            bool tracking_landing = false;
 
             if (V_z < APOGEE_VEL_MS) {
                 apogee_counter++;

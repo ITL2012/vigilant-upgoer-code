@@ -91,6 +91,7 @@ static constexpr double METERS_TO_FEET = 3.280839895013123;
 
 enum SystemMode {
     MODE_TRANSPORT,
+    MODE_PAD,
     MODE_ACTIVE_PAD
 };
 

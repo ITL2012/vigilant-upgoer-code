@@ -314,7 +314,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <h2 style="margin:0 0 10px 0;font-size:1.1rem;color:var(--accent);">Avionics System State</h2>
         <div class="btn-row">
             <button id="btn-mode-t" class="btn-accent" onclick="setSystemMode('transport')">Transport</button>
-            <button id="btn-mode-p" class="btn-dim" onclick="setSystemMode('active_pad')">Active Pad</button>
+            <button id="btn-mode-p" class="btn-dim" onclick="setSystemMode('pad')">Pad</button>
+            <button id="btn-mode-a" class="btn-dim" onclick="setSystemMode('active_pad')">Active Pad</button>
         </div>
         <div class="btn-row" id="flight-group" style="display:none;">
             <button class="btn-warning" onclick="sendCommand('/arm')">Arm</button>
@@ -482,6 +483,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 const modeVal = document.getElementById('sys-mode');
                 const btnMT = document.getElementById('btn-mode-t');
                 const btnMP = document.getElementById('btn-mode-p');
+                const btnMA = document.getElementById('btn-mode-a');
                 const fg = document.getElementById('flight-group');
                 const sp = document.getElementById('servo-ctrl-panel');
 
@@ -490,13 +492,23 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     modeVal.style.color = "var(--accent-warning)";
                     btnMT.className = "btn-accent";
                     btnMP.className = "btn-dim";
+                    btnMA.className = "btn-dim";
+                    fg.style.display = "none";
+                    sp.style.display = "block";
+                } else if (d.system_mode === 1) {
+                    modeVal.innerText = "PAD";
+                    modeVal.style.color = "var(--accent)";
+                    btnMT.className = "btn-dim";
+                    btnMP.className = "btn-accent";
+                    btnMA.className = "btn-dim";
                     fg.style.display = "none";
                     sp.style.display = "block";
                 } else {
                     modeVal.innerText = "ACTIVE PAD";
                     modeVal.style.color = "var(--accent)";
                     btnMT.className = "btn-dim";
-                    btnMP.className = "btn-accent";
+                    btnMP.className = "btn-dim";
+                    btnMA.className = "btn-accent";
                     fg.style.display = "flex";
                     sp.style.display = "block";
                 }

@@ -44,23 +44,26 @@ void debugCLI_printHelp() {
     Serial.println("  init instruments  - Reinitialize all sensors");
     Serial.println("  read sd           - List files on SD card");
     Serial.println("  sd info           - Show SD card info");
-    Serial.println("  servo <ch> <ang>  - Set servo angle (0-7, 60-120°)");
-    Serial.println("  mode <transport|active_pad> - Set system mode");
+    Serial.println("  servo <ch> <ang>  - Set servo angle (0-7, 60-120\")");
+    Serial.println("  mode <transport|pad|active_pad> - Set system mode");
     Serial.println("");
 }
 
 void debugCLI_printStatus() {
     Serial.println("\n=== SYSTEM STATUS ===");
-    Serial.printf("Mode: %s\n", (currentSystemMode.load(std::memory_order_relaxed) == MODE_TRANSPORT) ? "TRANSPORT" : "ACTIVE_PAD");
+    SystemMode mode = currentSystemMode.load(std::memory_order_relaxed);
+    const char* modeStr = (mode == MODE_TRANSPORT) ? "TRANSPORT" : 
+                          (mode == MODE_PAD) ? "PAD" : "ACTIVE_PAD";
+    Serial.printf("Mode: %s\n", modeStr);
     Serial.printf("Phase: %d (0=TRANSPORT, 1=PAD, 2=READY, 3=BOOST, 4=COAST, 5=DESCENT)\n", 
                   (int)currentPhase.load(std::memory_order_relaxed));
     Serial.printf("Armed: %s\n", systemArmed.load(std::memory_order_relaxed) ? "YES" : "NO");
     
     Serial.println("\n=== INSTRUMENTS ===");
-    Serial.printf("IMU (BNO085): %s\n", bnoInitialized ? "✓ OK" : "✗ FAILED");
-    Serial.printf("Barometer (BMP580): %s\n", bmpInitialized ? "✓ OK" : "✗ FAILED");
-    Serial.printf("GPS (TinyGPS): %s\n", sharedTelemetry.gpsUpdated ? "✓ OK" : "✗ NO FIX");
-    Serial.printf("SD Card: %s\n", sdReady ? "✓ OK" : "✗ NOT MOUNTED");
+    Serial.printf("IMU (BNO085): %s\n", bnoInitialized ? "OK" : "FAILED");
+    Serial.printf("Barometer (BMP580): %s\n", bmpInitialized ? "OK" : "FAILED");
+    Serial.printf("GPS (TinyGPS): %s\n", sharedTelemetry.gpsUpdated ? "OK" : "NO FIX");
+    Serial.printf("SD Card: %s\n", sdReady ? "OK" : "NOT MOUNTED");
     Serial.println("");
     Serial.println("--- Diagnostics ---");
     Serial.printf("SD init attempts: %u, failures: %u\n", sdInitAttempts, sdInitFailures);
@@ -74,7 +77,7 @@ void debugCLI_printStatus() {
     Serial.printf("Longitude: %.6f\n", sharedTelemetry.longitude);
     Serial.printf("Altitude (filtered): %.2f m\n", filter_alt);
     Serial.printf("Velocity Z: %.2f m/s\n", V_z);
-    Serial.printf("Roll: %.2f° Pitch: %.2f° Yaw: %.2f°\n", 
+    Serial.printf("Roll: %.2f Pitch: %.2f Yaw: %.2f\n", 
                   current_roll, current_pitch, current_yaw);
     Serial.println("");
 }
@@ -248,17 +251,33 @@ void debugCLI_processCommand(String cmd) {
         }
     }
     else if (cmd.startsWith("mode ")) {
+        // Prevent mode changes during flight
+        FlightPhase phaseNow = currentPhase.load(std::memory_order_relaxed);
+        if (phaseNow == BOOST || phaseNow == COAST || phaseNow == DESCENT) {
+            Serial.println("[MODE] BLOCKED: Cannot change mode during flight");
+            return;
+        }
+
         String mode = cmd.substring(5);
         if (mode == "transport") {
             currentSystemMode.store(MODE_TRANSPORT, std::memory_order_relaxed);
+            currentPhase.store(TRANSPORT, std::memory_order_relaxed);
             Serial.println("[MODE] Set to TRANSPORT");
-        } else if (mode == "active_pad") {
-            if (initInstruments()) {
-                currentSystemMode.store(MODE_ACTIVE_PAD, std::memory_order_relaxed);
-                Serial.println("[MODE] Set to ACTIVE_PAD");
-            } else {
-                Serial.println("[MODE] Instrument init failed - staying in TRANSPORT");
+        } else if (mode == "pad") {
+            if (!bnoInitialized || !bmpInitialized) {
+                if (!initInstruments()) {
+                    Serial.println("[MODE] Instrument init failed - staying in TRANSPORT");
+                    return;
+                }
+                calibrateGroundAltitude();
             }
+            currentSystemMode.store(MODE_PAD, std::memory_order_relaxed);
+            currentPhase.store(PAD, std::memory_order_relaxed);
+            Serial.println("[MODE] Set to PAD");
+        } else if (mode == "active_pad") {
+            currentSystemMode.store(MODE_ACTIVE_PAD, std::memory_order_relaxed);
+            currentPhase.store(READY, std::memory_order_relaxed);
+            Serial.println("[MODE] Set to ACTIVE_PAD (READY)");
         }
     }
     else if (cmd.length() > 0) {

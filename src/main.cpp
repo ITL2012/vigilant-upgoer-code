@@ -239,7 +239,7 @@ void loop() {
      FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
 
      if (debugMode == true) debugCLI_loop(); // Make debugcli more restrictive, but also easier to do HIL testing
-    
+     
      esp_task_wdt_reset();
 
     unsigned long currentMicros = micros();
@@ -252,9 +252,11 @@ void loop() {
     float qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
     float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
 
-    if (currentSystemMode.load(std::memory_order_relaxed) == MODE_ACTIVE_PAD) armedAlarm(); // Trigger the
+    SystemMode mode = currentSystemMode.load(std::memory_order_relaxed);
 
-    if (currentSystemMode.load(std::memory_order_relaxed) == MODE_ACTIVE_PAD) {
+    if (mode == MODE_ACTIVE_PAD) armedAlarm(); // Trigger the
+
+    if (mode == MODE_PAD || mode == MODE_ACTIVE_PAD) {
         raw_altitude = readBaroAltitude();
 
         if (bmpInitialized && bmp.performReading()) {
@@ -278,7 +280,6 @@ void loop() {
             shutdownWiFiNetwork();
         }
 
-       
         if (phase == PAD || phase == READY) {
             userPreFlightLoop(dt);
 
@@ -298,13 +299,14 @@ void loop() {
         }
 
     } else {
+        // MODE_TRANSPORT - sensors off, minimal loop
         userPreFlightLoop(dt);
         delay(10);
     }
 
     updateSharedTelemetry(roll, pitch, yaw, raw_altitude, filter_alt, V_z);
 
-    if (currentSystemMode.load(std::memory_order_relaxed) == MODE_ACTIVE_PAD) {
+    if (mode == MODE_PAD || mode == MODE_ACTIVE_PAD) {
         unsigned long now = millis();
         if (now - lastLogTime >= 10) {
             lastLogTime = now;
