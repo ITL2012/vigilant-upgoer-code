@@ -3,6 +3,7 @@
 
 #include "globals.h"
 #include "instruments.h"
+#include "buzzers.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <stdlib.h>
@@ -24,6 +25,14 @@ extern volatile float servoOverrideAngles[8];
 extern char serialLogBuffer[];
 extern volatile uint16_t serialLogHead;
 extern volatile uint16_t serialLogTail;
+extern char logCache[];
+extern volatile size_t logCacheHead;
+extern volatile size_t logCacheTail;
+extern volatile bool logCacheOverflow;
+extern SemaphoreHandle_t logCacheMutex;
+
+extern std::atomic<unsigned long long> systemBaseEpochMs;
+extern std::atomic<unsigned long> systemBaseMillis;
 
 // ============================================================================
 // READY-PHASE MINIMAL HTML PAGE
@@ -440,11 +449,26 @@ void handleServoTest() {
 }
 
 void handleSerialLog() {
+    String out;
+    out.reserve(4096);
+
+    // First, serve from the pre-SD-init log cache
+    if (logCacheMutex && xSemaphoreTake(logCacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (logCacheHead != logCacheTail) {
+            if (logCacheHead > logCacheTail) {
+                out.concat(&logCache[logCacheTail], logCacheHead - logCacheTail);
+            } else {
+                out.concat(&logCache[logCacheTail], LOG_CACHE_SIZE - logCacheTail);
+                out.concat(&logCache[0], logCacheHead);
+            }
+            logCacheTail = logCacheHead;
+        }
+        xSemaphoreGive(logCacheMutex);
+    }
+
+    // Then serve from the serial log buffer
     uint16_t h = serialLogHead;
     uint16_t t = serialLogTail;
-
-    String out;
-    out.reserve(2048);
 
     if (h >= t) {
         for (uint16_t i = t; i < h; i++) {

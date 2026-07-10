@@ -65,6 +65,7 @@ static constexpr int I2C_SCL      = 3;
 static constexpr unsigned long I2C_SPEED = 400000UL;
 static constexpr uint8_t PCA9685_ADDR = 0x40;
 
+static constexpr int GPS_BAUD = 9600;
 static constexpr int GPS_RX2 = 16;
 static constexpr int GPS_TX2 = 17;
 static constexpr int BUZZER_PIN = 38;
@@ -79,6 +80,7 @@ static const char SYSTEM_LOG_FILE_PATH[] = "/system_log.txt";
 static constexpr int LOG_QUEUE_LEN = 500;
 static constexpr size_t LOG_MESSAGE_BUFFER_SIZE = 256;
 static constexpr size_t SERIAL_LOG_BUF_SIZE = 4096;
+static constexpr size_t LOG_CACHE_SIZE = 8192;
 static constexpr float LAUNCH_ACCEL_THRESHOLD = 25.0f;
 static constexpr float APOGEE_VEL_THRESHOLD = -0.5f;
 static constexpr unsigned long IMU_TIMEOUT_MS = 500;
@@ -215,15 +217,17 @@ extern volatile uint32_t logDropCount;
 
 extern bool sdReady;
 
-// Buzzer functions
-void playTone(unsigned int freq, unsigned long duration_ms);
-void initBuzzerLEDC();
+// Pre-SD-init log cache
+extern char logCache[LOG_CACHE_SIZE];
+extern volatile size_t logCacheHead;
+extern volatile size_t logCacheTail;
+extern volatile bool logCacheOverflow;
 
-// System epoch bookkeeping (ms since 1970-01-01 UTC)
-extern std::atomic<unsigned long long> systemBaseEpochMs;
-extern std::atomic<unsigned long> systemBaseMillis;
+extern SemaphoreHandle_t logCacheMutex;
 
 void write(int destination, int severity, const char *format, ...);
+void flushLogCacheToSD();
+void initLogCache();
 
 void userCustomSetup();
 

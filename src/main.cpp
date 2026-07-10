@@ -46,6 +46,13 @@ char serialLogBuffer[SERIAL_LOG_BUF_SIZE];
 volatile uint16_t serialLogHead = 0;
 volatile uint16_t serialLogTail = 0;
 
+char logCache[LOG_CACHE_SIZE];
+volatile size_t logCacheHead = 0;
+volatile size_t logCacheTail = 0;
+volatile bool logCacheOverflow = false;
+
+SemaphoreHandle_t logCacheMutex = NULL;
+
 unsigned long lastMicros = 0;
 unsigned long lastLogTime = 0;
 std::atomic<unsigned long> lastIMUReport_ms(0);
@@ -69,10 +76,23 @@ TaskHandle_t sdWriterTaskHandle = NULL;
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n====================================");
-    Serial.println("ISAAC L FLIGHT CONTROLLER - BOOTING");
-    Serial.println("====================================");
-    Serial.println("[DEBUG] Type 'help' for debug commands\n");
+
+    initLogCache();
+
+    write(LOG_SERIAL, LOG_INFO, "\n====================================");
+    write(LOG_SERIAL, LOG_INFO, "ISAAC L FLIGHT CONTROLLER - BOOTING");
+    write(LOG_SERIAL, LOG_INFO, "====================================");
+    if (debugMode) write(LOG_SERIAL, LOG_INFO, "[DEBUG] Type 'help' for debug commands\n");
+
+
+
+
+
+    #pragma region Initialization
+
+
+
+
 
     esp_task_wdt_init(WDT_TIMEOUT_S, true);
     esp_task_wdt_add(NULL);
@@ -86,62 +106,65 @@ void setup() {
     sdLogQueue = createPSRAMBackedQueue(LOG_QUEUE_LEN, sizeof(LogPacket));
 
     if (telemetryMutex == NULL || sdLogQueue == NULL || webServerMutex == NULL) {
-        Serial.println("[CRITICAL ERROR] Failed to create RTOS structures!");
+        write(LOG_SERIAL, LOG_ERROR, "[CRITICAL ERROR] Failed to create RTOS structures!");
         while (1) {
             delay(100);
         }
     }
 
+
+
     // ---- I2C Bus Initialization ----
-    Serial.println("[BOOT] Initializing I2C bus...");
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing I2C bus...");
     Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(I2C_SPEED);
     delay(100);
-    Serial.println("[OK] I2C bus ready");
+    write(LOG_BOTH, LOG_INFO, "[OK] I2C bus ready");
 
     // ---- PWM/Servo Initialization ----
-    Serial.println("[BOOT] Initializing PWM controller...");
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing PWM controller...");
     // Adafruit_PWMServoDriver::begin() returns void; call it and proceed.
     pwm.begin();
     pwm.setPWMFreq(50);
     UserSpace::initServos();
-    Serial.println("[OK] PWM controller initialized");
+    write(LOG_BOTH, LOG_INFO, "[OK] PWM controller initialized");
 
     // ---- Flight Control PID Initialization ----
-    Serial.println("[BOOT] Initializing stabilization PIDs...");
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing stabilization PIDs...");
     initStabilizationPIDs();
     airspeedFilter.init();
-    Serial.println("[OK] PIDs initialized");
+    write(LOG_BOTH, LOG_INFO, "[OK] PIDs initialized");
 
     // ---- SPI Bus Initialization ----
-    Serial.println("[BOOT] Initializing SPI bus...");
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing SPI bus...");
     hspi = new SPIClass(HSPI);
     hspi->begin(HSPI_CLK, HSPI_MISO, HSPI_MOSI, SD_CS);
     delay(100);
-    Serial.println("[OK] SPI bus ready");
+    write(LOG_BOTH, LOG_INFO, "[OK] SPI bus ready");
 
     // ---- SD Card Initialization ----
-    Serial.println("[BOOT] Initializing SD card...");
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing SD card...");
     SDInit();
     if (sdReady) {
-        Serial.println("[OK] SD card ready for logging");
-        write(LOG_SD, LOG_INFO, "SD card ready for logging.");
+        write(LOG_BOTH, LOG_INFO, "[OK] SD card ready for logging");
+        write(LOG_BOTH, LOG_INFO, "SD card ready for logging.");
+        flushLogCacheToSD();
     } else {
-        Serial.println("[WARN] SD card not available - logging disabled");
+        write(LOG_BOTH, LOG_WARN, "[WARN] SD card not available - logging disabled");
     }
 
     // ---- GPS Initialization ----
-    Serial.println("[BOOT] Initializing GPS module...");
-    gpsSerial.begin(9600, SERIAL_8N1, GPS_RX2, GPS_TX2);
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing GPS module...");
+    gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX2, GPS_TX2);
     delay(200);
     if (!gpsSerial) {
-        Serial.println("[WARN] GPS serial port not available");
+        write(LOG_BOTH, LOG_WARN, "[WARN] GPS serial port not available");
     } else {
-        Serial.println("[OK] GPS communication open at 9600 baud");
+        write(LOG_BOTH, LOG_INFO, "[OK] GPS communication open at %d baud", GPS_BAUD);
     }
 
 
-    Serial.println("[BOOT] Creating RTOS tasks...");
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Creating RTOS tasks...");
     
     // Create Telemetry/GPS Task (handles GPS data collection)
     if (xTaskCreatePinnedToCore(
@@ -153,9 +176,9 @@ void setup() {
         &telemetryTaskHandle,
         0
     ) != pdPASS) {
-        Serial.println("[ERROR] Failed to create telemetry task!");
+        write(LOG_BOTH, LOG_ERROR, "[ERROR] Failed to create telemetry task!");
     } else {
-        Serial.println("[OK] Telemetry task created");
+        write(LOG_BOTH, LOG_INFO, "[OK] Telemetry task created");
     }
 
     // Create SD Writer Task (only if SD is ready)
@@ -169,12 +192,12 @@ void setup() {
             &sdWriterTaskHandle,
             0
         ) != pdPASS) {
-            Serial.println("[ERROR] Failed to create SD task!");
+            write(LOG_BOTH, LOG_ERROR, "[ERROR] Failed to create SD task!");
         } else {
-            Serial.println("[OK] SD logging task created");
+            write(LOG_BOTH, LOG_INFO, "[OK] SD logging task created");
         }
     } else {
-        Serial.println("[SKIP] SD task skipped (SD not ready)");
+        write(LOG_BOTH, LOG_INFO, "[SKIP] SD task skipped (SD not ready)");
         sdWriterTaskHandle = NULL;
     }
 
@@ -188,22 +211,27 @@ void setup() {
         &wifiServerTaskHandle,
         0
     ) != pdPASS) {
-        Serial.println("[ERROR] Failed to create WiFi task!");
+        write(LOG_BOTH, LOG_ERROR, "[ERROR] Failed to create WiFi task!");
     } else {
-        Serial.println("[OK] WiFi server task created");
+        write(LOG_BOTH, LOG_INFO, "[OK] WiFi server task created");
     }
 
     delay(500); // Give tasks time to start
 
+    #pragma endregion
+
+
     // Signal successful boot with chime (move after bus and task init to avoid LEDC warnings)
     startupChime();
 
-    Serial.println("\n====================================");
-    Serial.println("BOOT COMPLETE - READY FOR OPERATION");
-    Serial.println("====================================");
-    Serial.println("[SYSTEM] Core 1 standby. Mode: TRANSPORT.");
-    Serial.println("[DEBUG] Enter command (type 'help'):\n");
+    write(LOG_SERIAL, LOG_INFO, "\n====================================");
+    write(LOG_SERIAL, LOG_INFO, "BOOT COMPLETE - READY FOR OPERATION");
+    write(LOG_SERIAL, LOG_INFO, "====================================");
+    write(LOG_BOTH, LOG_INFO, "[SYSTEM] Core 1 standby. Mode: TRANSPORT.");
+    if (debugMode) {
+    write(LOG_SERIAL, LOG_INFO, "[DEBUG] Enter command (type 'help'):\n");
     Serial.print("> ");
+    }
 }
 
 void loop() {

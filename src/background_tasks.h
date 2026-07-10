@@ -16,6 +16,11 @@ extern QueueHandle_t sdLogQueue;
 extern char serialLogBuffer[];
 extern volatile uint16_t serialLogHead;
 extern volatile uint16_t serialLogTail;
+extern char logCache[];
+extern volatile size_t logCacheHead;
+extern volatile size_t logCacheTail;
+extern volatile bool logCacheOverflow;
+extern SemaphoreHandle_t logCacheMutex;
 
 // ---- Diagnostic Counters ----
 
@@ -76,17 +81,74 @@ QueueHandle_t createPSRAMBackedQueue(size_t queueLength, size_t itemSize) {
 
 // ---- Logging Helpers ----
 
-void logMessage(const char *message) {
-    if (sdReady) {
-        File file = SD.open(SYSTEM_LOG_FILE_PATH, FILE_APPEND);
-        if (file) {
-            file.println(message);
-            file.close();
-            return;
-        }
+void initLogCache() {
+    logCacheHead = 0;
+    logCacheTail = 0;
+    logCacheOverflow = false;
+    logCacheMutex = xSemaphoreCreateMutex();
+    if (logCacheMutex == NULL) {
+        Serial.println("[ERROR] Failed to create log cache mutex!");
     }
+}
 
-    Serial.println(message);
+void appendToLogCache(const char *msg) {
+    if (logCacheMutex && xSemaphoreTake(logCacheMutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+        return;
+    }
+    
+    size_t len = strlen(msg);
+    if (len >= LOG_CACHE_SIZE) len = LOG_CACHE_SIZE - 1;
+    
+    size_t space;
+    if (logCacheHead >= logCacheTail) {
+        space = LOG_CACHE_SIZE - (logCacheHead - logCacheTail) - 1;
+    } else {
+        space = logCacheTail - logCacheHead - 1;
+    }
+    
+    if (len >= space) {
+        logCacheOverflow = true;
+        if (logCacheMutex) xSemaphoreGive(logCacheMutex);
+        return;
+    }
+    
+    size_t firstChunk = min(len, LOG_CACHE_SIZE - logCacheHead);
+    memcpy(&logCache[logCacheHead], msg, firstChunk);
+    logCacheHead = (logCacheHead + firstChunk) % LOG_CACHE_SIZE;
+    
+    if (firstChunk < len) {
+        memcpy(&logCache[logCacheHead], msg + firstChunk, len - firstChunk);
+        logCacheHead = (logCacheHead + len - firstChunk) % LOG_CACHE_SIZE;
+    }
+    
+    if (logCacheMutex) xSemaphoreGive(logCacheMutex);
+}
+
+void flushLogCacheToSD() {
+    if (!sdReady || logCacheHead == logCacheTail) return;
+    
+    if (logCacheMutex && xSemaphoreTake(logCacheMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return;
+    }
+    
+    File file = SD.open(SYSTEM_LOG_FILE_PATH, FILE_APPEND);
+    if (file) {
+        size_t total = (logCacheHead >= logCacheTail) ? 
+            (logCacheHead - logCacheTail) : (LOG_CACHE_SIZE - logCacheTail + logCacheHead);
+        
+        if (logCacheHead >= logCacheTail) {
+            file.write((uint8_t*)&logCache[logCacheTail], total);
+        } else {
+            size_t firstChunk = LOG_CACHE_SIZE - logCacheTail;
+            file.write((uint8_t*)&logCache[logCacheTail], firstChunk);
+            file.write((uint8_t*)&logCache[0], logCacheHead);
+        }
+        file.close();
+        logCacheTail = logCacheHead;
+        logCacheOverflow = false;
+    }
+    
+    if (logCacheMutex) xSemaphoreGive(logCacheMutex);
 }
 
 const char *getSeverityLabel(int severity) {
@@ -113,16 +175,18 @@ void write(int destination, int severity, const char *format, ...) {
             if (file) {
                 file.println(output);
                 file.close();
-            } else {
-                Serial.println("[ERROR] Failed to open system log file on SD");
             }
         } else {
-            Serial.println("[WARN] SD not ready: skipping SD log write");
+            appendToLogCache(output);
+            appendToLogCache("\n");
         }
     }
 
     if (destination == LOG_SERIAL || destination == LOG_BOTH) {
         Serial.println(output);
+        appendToLogCache(output);
+        appendToLogCache("\n");
+        
         for (const char *p = output; *p; p++) {
             uint16_t next = (serialLogHead + 1) % SERIAL_LOG_BUF_SIZE;
             if (next != serialLogTail) {

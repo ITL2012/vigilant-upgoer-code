@@ -2,6 +2,7 @@
 #define GUIDANCE_INSTRUMENTS_H
 
 #include "globals.h"
+#include "buzzers.h"
 #include <Adafruit_BNO08x.h>
 #include <Adafruit_BMP5xx.h>
 #include <SPI.h>
