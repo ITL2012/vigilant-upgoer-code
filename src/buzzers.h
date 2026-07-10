@@ -9,30 +9,6 @@
 static constexpr int BUZZER_LEDC_CHANNEL = 0;
 static bool buzzerLedsInitialized = false;
 
-void armedAlarm() { // I dont know (but hope) it will stop when READY is off, but maybe not, thatll be fixed if needed
-  // Localized variables that remember their state between calls
-  static unsigned long lastBuzzerAction = 0;
-  static bool buzzerIsOn = false;
-  
-  unsigned long currentMillis = millis();
-  
-  if (buzzerIsOn) {
-    // If the buzzer has been on for 100ms, turn it off
-    if (currentMillis - lastBuzzerAction >= 100) {
-      noTone(BUZZER_PIN);
-      buzzerIsOn = false;
-      lastBuzzerAction = currentMillis;
-    }
-  } else {
-    // If the buzzer has been off for 200ms, turn it back on
-    if (currentMillis - lastBuzzerAction >= 200) {
-      tone(BUZZER_PIN, 1760); // Sharp, high-urgency pitch
-      buzzerIsOn = true;
-      lastBuzzerAction = currentMillis;
-    }
-  }
-}
-
 void initBuzzerLEDC() {
     if (buzzerLedsInitialized) return;
     // Initialize LEDC: use 12-bit resolution (max for 5kHz), 5000Hz base freq
@@ -46,7 +22,7 @@ void initBuzzerLEDC() {
     // Attach buzzer pin to LEDC channel 0
     ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CHANNEL);
     buzzerLedsInitialized = true;
-    Serial.println("[OK] Buzzer LEDC initialized");
+    write(LOG_BOTH, LOG_INFO, "[OK] Buzzer LEDC initialized");
 }
 
 void playTone(unsigned int freq, unsigned long duration_ms) {
@@ -54,6 +30,59 @@ void playTone(unsigned int freq, unsigned long duration_ms) {
     initBuzzerLEDC();
     tone(BUZZER_PIN, freq, duration_ms);
 }
+
+
+void armedAlarm() { 
+  static unsigned long lastBuzzerAction = 0;
+  unsigned long currentMillis = millis();
+  
+  // Total cycle time = 100ms (on time) + 200ms (off time) = 300ms
+  if (currentMillis - lastBuzzerAction >= 300) {
+    playTone(1760, 100); // Plays for 100ms non-blocking
+    lastBuzzerAction = currentMillis;
+  }
+}
+
+void recoveryNoise() {
+  // Instant safety cutoff if buzzer is disabled globally
+  if (enableBuzzer != true) {
+    noTone(BUZZER_PIN);
+    return;
+  }
+
+  // Configurations
+  const unsigned long TONE_DURATION  = 150;  // Length of each chirp pitch (ms)
+  const unsigned long CYCLE_DURATION = 2700; // Total time for the whole pattern (1200ms sound + 1500ms silence)
+
+  static unsigned long lastCycleStart = 0;
+  unsigned long currentMillis = millis();
+
+  // Reset our master clock cycle when the 2.7-second window finishes
+  if (currentMillis - lastCycleStart >= CYCLE_DURATION) {
+    lastCycleStart = currentMillis;
+  }
+
+  unsigned long elapsedInCycle = currentMillis - lastCycleStart;
+
+  // The first 1200ms of the cycle plays 8 alternating chirps
+  if (elapsedInCycle < 1200) {
+    // Determine which chirp number we are currently on (0 through 7)
+    int currentChirpIndex = elapsedInCycle / TONE_DURATION;
+
+    // Even numbers play 2500Hz, Odd numbers play 4000Hz
+    if (currentChirpIndex % 2 == 0) {
+      playTone(2500, TONE_DURATION);
+    } else {
+      playTone(4000, TONE_DURATION);
+    }
+  } 
+  else {
+    // The remaining 1500ms of the cycle is absolute silence
+    noTone(BUZZER_PIN);
+  }
+}
+
+
 
 void startupChime() {
     playTone(523, 100); delay(120);

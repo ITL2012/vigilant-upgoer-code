@@ -252,6 +252,8 @@ void loop() {
     float qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
     float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
 
+    if (currentSystemMode.load(std::memory_order_relaxed) == MODE_ACTIVE_PAD) armedAlarm(); // Trigger the
+
     if (currentSystemMode.load(std::memory_order_relaxed) == MODE_ACTIVE_PAD) {
         raw_altitude = readBaroAltitude();
 
