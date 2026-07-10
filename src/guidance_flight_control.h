@@ -291,7 +291,6 @@ FlightPhase flight_core_get_phase(void) {
 uint32_t landing_start_ms = 0;  // Stores when landing conditions were first met
 bool tracking_landing = false;  // Tracks if the timer is actively running
 
-
 void process_flight_state_machine(float raw_accel_z, float filter_alt) {
     static uint16_t apogee_counter = 0;
     static float max_altitude = 0.0f;
@@ -330,44 +329,48 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
             if (raw_accel_z > LIFTOFF_ACCEL_G && armed && mode == MODE_ACTIVE_PAD) {
                 currentPhase.store(BOOST, std::memory_order_relaxed);
                 ::filter_alt = 0.0f;
+                liftoff_time_ms.store(millis(), std::memory_order_relaxed);
                 write(LOG_BOTH, LOG_INFO, "[PHASE] READY -> BOOST (Liftoff Accel Trigger)");
             }
         break;
         case BOOST:
             if (raw_accel_z < BURNOUT_ACCEL_G) {
-                currentPhase.store(COAST, std::memory_order_relaxed);
-                write(LOG_BOTH, LOG_INFO, "[PHASE] BOOST -> COAST (Motor Burnout Trigger)");
+                unsigned long now = millis();
+                if (now - liftoff_time_ms.load(std::memory_order_relaxed) >= COAST_LOCKOUT_MS) {
+                    currentPhase.store(COAST, std::memory_order_relaxed);
+                    write(LOG_BOTH, LOG_INFO, "[PHASE] BOOST -> COAST (Burnout Verified)");
+                }
             }
             break;
 
-        case COAST:
-            if (V_z <= APOGEE_VEL_MS && (max_altitude - filter_alt > 1.5f)) {
-                apogee_counter++;
-            } else {
-                if (apogee_counter > 0) apogee_counter--;
+        case COAST: {
+            // Step 1: Backup timer — forces apogee counter to buffer size
+            if (millis() - liftoff_time_ms.load(std::memory_order_relaxed) >= APOGEE_BACKUP_TIMEOUT_MS) {
+                if (apogee_counter < APOGEE_BUFFER_SIZE) {
+                    apogee_counter = APOGEE_BUFFER_SIZE;
+                    write(LOG_BOTH, LOG_WARN, "[APOGEE] Backup timer expired (%n)", APOGEE_BACKUP_TIMEOUT_MS);
+                }
             }
 
+            // Step 2: Zero-crossing detection (pure V_z, no altitude drop)
+            if (apogee_counter < APOGEE_BUFFER_SIZE) {
+                if (V_z <= APOGEE_VEL_MS) {
+                    apogee_counter++;
+                } else {
+                    if (apogee_counter > 0) apogee_counter--;
+                }
+            }
+
+            // Step 3: Confirm apogee and deploy
             if (apogee_counter >= APOGEE_BUFFER_SIZE) {
+                fire_apogee_pyro();
                 currentPhase.store(DESCENT, std::memory_order_relaxed);
                 write(LOG_BOTH, LOG_INFO, "[PHASE] COAST -> DESCENT (Apogee Confirmed)");
-                fire_apogee_pyro();
             }
             break;
+        }
 
         case DESCENT: {
-            uint32_t landing_start_ms = 0;
-            bool tracking_landing = false;
-
-            if (V_z < APOGEE_VEL_MS) {
-                apogee_counter++;
-                if (apogee_counter >= APOGEE_BUFFER_SIZE) {
-                    currentPhase.store(DESCENT, std::memory_order_relaxed);
-                    write(LOG_BOTH, LOG_INFO, "[PHASE] COAST -> DESCENT (Apogee Detected)");
-                }
-            } else {
-                apogee_counter = 0;
-            }
-
             if (filter_alt < 5.0f && !tracking_landing) {
                 landing_start_ms = millis();
                 tracking_landing = true;

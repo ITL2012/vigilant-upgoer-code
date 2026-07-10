@@ -21,6 +21,8 @@ std::atomic<bool> wifiActive(true);
 std::atomic<unsigned long long> systemBaseEpochMs(0);
 std::atomic<unsigned long> systemBaseMillis(0);
 
+std::atomic<unsigned long> liftoff_time_ms(0);
+
 float V_z = 0.0f;
 float filter_alt = 0.0f;
 float baseline_altitude = 0.0f;

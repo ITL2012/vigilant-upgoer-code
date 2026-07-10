@@ -86,6 +86,8 @@ static constexpr float APOGEE_VEL_THRESHOLD = -0.5f;
 static constexpr unsigned long IMU_TIMEOUT_MS = 500;
 static constexpr float DEPLOYMENT_ALTITUDE = 50.0f;
 static constexpr unsigned long WDT_TIMEOUT_S = 5;
+static constexpr unsigned long COAST_LOCKOUT_MS = 1500;
+static constexpr unsigned long APOGEE_BACKUP_TIMEOUT_MS = 10000;
 
 static constexpr double METERS_TO_FEET = 3.280839895013123;
 
@@ -214,6 +216,7 @@ extern float qnh_pressure;
 extern unsigned long lastMicros;
 extern unsigned long lastLogTime;
 extern std::atomic<unsigned long> lastIMUReport_ms;
+extern std::atomic<unsigned long> liftoff_time_ms;
 extern std::atomic<uint32_t> logDropCount;
 
 extern bool sdReady;
