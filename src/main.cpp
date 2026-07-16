@@ -6,6 +6,7 @@
 #include "Launchsequence.h"
 #include "debug_cli.h"
 #include "buzzers.h"
+#include "flight_profile.h"
 
 #include <Arduino.h>
 #include <math.h>
@@ -68,6 +69,56 @@ SemaphoreHandle_t telemetryMutex = NULL;
 QueueHandle_t sdLogQueue = NULL;
 TaskHandle_t telemetryTaskHandle = NULL;
 TaskHandle_t sdWriterTaskHandle = NULL;
+
+FlightProfileEngine profileEngine;
+
+// ============================================================================
+// EXAMPLE FLIGHT PROFILES (flash-stored, web-selectable)
+// ============================================================================
+
+// Math skills test: roll 180, roll back, pitch 20, then flatten for recovery
+static const FlightProfile mathTestProfile = {
+    "MATH_TEST",
+    {
+        { 180.0f,  0.0f,   0.0f,  5.0f, TRIG_TIME,    0.0f,  40.0f },  // Roll 180° over 5s
+        {   0.0f,  0.0f,   0.0f,  3.0f, TRIG_TIME,    0.0f,  40.0f },  // Roll back to 0
+        {   0.0f, 20.0f,   0.0f,  4.0f, TRIG_TIME,    0.0f,  30.0f },  // Pitch 20°
+        {   0.0f,  0.0f,   0.0f,  0.0f, TRIG_APOGEE,  0.0f,  25.0f },  // Flatten at apogee
+        {   0.0f,  0.0f,   0.0f,  0.0f, TRIG_ALTITUDE, 50.0f, 20.0f }, // Hold level to 50m
+    },
+    5, false
+};
+
+// Roll calibration: slow 90° roll each direction to check servo direction
+static const FlightProfile rollCalProfile = {
+    "ROLL_CAL",
+    {
+        {  90.0f,  0.0f,   0.0f,  4.0f, TRIG_TIME, 0.0f, 25.0f },
+        {   0.0f,  0.0f,   0.0f,  2.0f, TRIG_TIME, 0.0f, 25.0f },
+        { -90.0f,  0.0f,   0.0f,  4.0f, TRIG_TIME, 0.0f, 25.0f },
+        {   0.0f,  0.0f,   0.0f,  2.0f, TRIG_TIME, 0.0f, 25.0f },
+    },
+    4, false
+};
+
+// Apogee hold / recovery: flatten at apogee, hold level until low altitude
+static const FlightProfile recoveryProfile = {
+    "RECOVERY",
+    {
+        {   0.0f,  0.0f,   0.0f,  0.0f, TRIG_APOGEE,   0.0f,  25.0f },  // Flatten at apogee
+        {   0.0f,  0.0f,   0.0f,  0.0f, TRIG_ALTITUDE, 30.0f, 15.0f },  // Hold level to 30m
+    },
+    2, false
+};
+
+// Profile registry for web UI / CLI (non-const to avoid internal-linkage
+// 'extern initialized' warning; headers declare these as extern)
+const FlightProfile* const availableProfiles[] = {
+    &mathTestProfile,
+    &rollCalProfile,
+    &recoveryProfile,
+};
+const uint8_t numAvailableProfiles = 3;
 
 
 
@@ -149,6 +200,7 @@ void setup() {
         write(LOG_BOTH, LOG_INFO, "[OK] SD card ready for logging");
         write(LOG_BOTH, LOG_INFO, "SD card ready for logging.");
         flushLogCacheToSD();
+        loadAllProfilesFromSD();
     } else {
         write(LOG_BOTH, LOG_WARN, "[WARN] SD card not available - logging disabled");
     }
@@ -269,6 +321,11 @@ void loop() {
         }
 
         updateRocketFusion(lin_ax, lin_ay, lin_az, qx, qy, qz, qw, raw_altitude, previous_altitude, dt);
+
+        // Update flight profile engine (generates attitude setpoints)
+        FlightPhase engPhase = currentPhase.load(std::memory_order_relaxed);
+        bool apogeeDetected = (engPhase == DESCENT);
+        profileEngine.update(dt, filter_alt, V_z, engPhase, apogeeDetected);
 
         FlightPhase wifiPhase = currentPhase.load(std::memory_order_relaxed);
         if (wifiPhase == BOOST && wifiActive.load(std::memory_order_relaxed)) {

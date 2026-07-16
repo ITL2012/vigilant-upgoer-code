@@ -3,6 +3,7 @@
 
 #include "globals.h"
 #include "Launchsequence.h"
+#include "flight_profile.h"
 #include <QuickPID.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <Wire.h>
@@ -478,10 +479,24 @@ void userFlightStabilizationLoop(float roll, float pitch, float yaw,
         pid[i].SetSampleTimeUs(dt_us);
     }
 
+    // Attitude setpoints: from active flight profile, else level (0,0,0)
+    float spRoll  = 0.0f;
+    float spPitch = 0.0f;
+    float spYaw   = 0.0f;
+    if (profileEngine.isActive()) {
+        spRoll  = profileEngine.getSetpointRoll();
+        spPitch = profileEngine.getSetpointPitch();
+        spYaw   = profileEngine.getSetpointYaw();
+    }
+
     for (int i = 0; i < NUM_PIDS; i++) {
-        pidInput[i] = surfaceWeights[i].roll  * roll +
-                      surfaceWeights[i].pitch * pitch +
-                      surfaceWeights[i].yaw   * yaw;
+        // PID input = weighted attitude ERROR (drives error to zero)
+        float rollErr  = roll  - spRoll;
+        float pitchErr = pitch - spPitch;
+        float yawErr   = yaw   - spYaw;
+        pidInput[i] = surfaceWeights[i].roll  * rollErr +
+                      surfaceWeights[i].pitch * pitchErr +
+                      surfaceWeights[i].yaw   * yawErr;
         pidSetpoint[i] = 0.0f;
     }
 

@@ -347,6 +347,32 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
+    <!-- FLIGHT PROFILE -->
+    <div class="panel">
+        <div class="section-title" onclick="toggleSection(this)" style="margin:0 0 10px 0;">Flight Profile <span id="profile-status-badge" style="font-size:0.7rem;color:var(--text-dim);"></span></div>
+        <div class="section-body">
+            <div class="btn-row" style="margin-bottom:8px;">
+                <select id="profile-select" class="btn-dark" style="flex:1;"></select>
+                <button class="btn-accent" onclick="startProfile()">Start</button>
+                <button class="btn-danger" onclick="stopProfile()">Stop</button>
+            </div>
+            <div id="profile-status" style="font-size:0.8rem;color:var(--text-dim);text-align:center;font-variant-numeric:tabular-nums;">
+                No active profile
+            </div>
+            <div style="margin-top:8px;">
+                <div style="background:#0a0c10;border:1px solid var(--border);border-radius:6px;height:10px;overflow:hidden;">
+                    <div id="profile-progress-bar" style="height:100%;width:0%;background:var(--accent);transition:width 0.2s;"></div>
+                </div>
+            </div>
+            <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px;">
+                <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:4px;">Upload JSON to SD</div>
+                <input id="profile-upload-name" class="btn-dark" style="width:100%;margin-bottom:4px;" placeholder="profile_name" />
+                <textarea id="profile-upload-json" class="btn-dark" style="width:100%;height:70px;font-size:0.65rem;font-family:monospace;" placeholder='{"name":"MY_PROFILE","loop":false,"steps":[{"roll":180,"pitch":0,"yaw":0,"duration":5,"trigger":"time","value":0,"rate":40}]}'></textarea>
+                <button class="btn-accent" style="margin-top:4px;" onclick="uploadProfile()">Upload & Register</button>
+            </div>
+        </div>
+    </div>
+
     <!-- SERIAL LOG -->
     <div class="panel">
         <div class="section-title" onclick="toggleSection(this)" style="margin:0 0 10px 0;">Serial Log</div>
@@ -576,9 +602,81 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         document.getElementById('btn-autoscroll').innerText = "Auto-scroll: " + (autoScroll ? "ON" : "OFF");
     }
 
+    function loadProfileList() {
+        fetch('/profile_list')
+            .then(r => r.json())
+            .then(d => {
+                const sel = document.getElementById('profile-select');
+                sel.innerHTML = '';
+                (d.profiles || []).forEach((p, i) => {
+                    const opt = document.createElement('option');
+                    opt.value = p.name;
+                    opt.innerText = p.name + ' [' + p.source + '] (' + p.steps + ' steps)';
+                    sel.appendChild(opt);
+                });
+            })
+            .catch(() => {});
+    }
+
+    function startProfile() {
+        const name = document.getElementById('profile-select').value;
+        fetch('/profile_start?name=' + encodeURIComponent(name), {method:'POST'})
+            .then(r => r.text()).then(t => addSerialLine(t)).catch(() => {});
+    }
+
+    function stopProfile() {
+        fetch('/profile_stop', {method:'POST'})
+            .then(r => r.text()).then(t => addSerialLine(t)).catch(() => {});
+    }
+
+    function uploadProfile() {
+        const name = document.getElementById('profile-upload-name').value.trim();
+        const json = document.getElementById('profile-upload-json').value;
+        if (!name || !json) { alert("Need both name and JSON"); return; }
+        const fd = new URLSearchParams();
+        fd.append('name', name);
+        fd.append('json', json);
+        fetch('/profile_upload', {method:'POST', body: fd})
+            .then(r => r.text()).then(t => {
+                addSerialLine(t);
+                loadProfileList();
+            }).catch(() => {});
+    }
+
+    function addSerialLine(text) {
+        const box = document.getElementById('serial-log');
+        if (box) { box.textContent += text + '\n'; if (autoScroll) box.scrollTop = box.scrollHeight; }
+    }
+
+    function updateProfileStatus() {
+        fetch('/profile_status')
+            .then(r => r.json())
+            .then(d => {
+                const badge = document.getElementById('profile-status-badge');
+                const status = document.getElementById('profile-status');
+                const bar = document.getElementById('profile-progress-bar');
+                if (d.active) {
+                    badge.innerText = '● ACTIVE';
+                    badge.style.color = 'var(--accent)';
+                    status.innerText = d.name + ' | Step ' + d.step + '/' + d.numSteps +
+                        ' | R' + d.setpointRoll.toFixed(0) + ' P' + d.setpointPitch.toFixed(0) +
+                        ' Y' + d.setpointYaw.toFixed(0);
+                    bar.style.width = (d.progress * 100).toFixed(0) + '%';
+                } else {
+                    badge.innerText = 'IDLE';
+                    badge.style.color = 'var(--text-dim)';
+                    status.innerText = 'No active profile (level stabilization)';
+                    bar.style.width = '0%';
+                }
+            })
+            .catch(() => {});
+    }
+
     setInterval(updateTelemetry, 250);
     setInterval(fetchSerialLog, 500);
+    setInterval(updateProfileStatus, 500);
     updateTelemetry();
+    loadProfileList();
     // send browser time once on load to bootstrap system clock if GPS unavailable
     sendClientTime();
 </script>

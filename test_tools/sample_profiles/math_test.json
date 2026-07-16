@@ -1,0 +1,11 @@
+{
+  "name": "MATH_TEST",
+  "loop": false,
+  "steps": [
+    {"roll": 180, "pitch": 0, "yaw": 0, "duration": 5.0, "trigger": "time", "value": 0, "rate": 40},
+    {"roll": 0, "pitch": 0, "yaw": 0, "duration": 3.0, "trigger": "time", "value": 0, "rate": 40},
+    {"roll": 0, "pitch": 20, "yaw": 0, "duration": 4.0, "trigger": "time", "value": 0, "rate": 30},
+    {"roll": 0, "pitch": 0, "yaw": 0, "duration": 0, "trigger": "apogee", "value": 0, "rate": 25},
+    {"roll": 0, "pitch": 0, "yaw": 0, "duration": 0, "trigger": "altitude", "value": 50, "rate": 20}
+  ]
+}

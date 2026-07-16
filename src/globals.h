@@ -225,6 +225,10 @@ extern volatile bool logCacheOverflow;
 
 extern SemaphoreHandle_t logCacheMutex;
 
+// Flight profile engine
+class FlightProfileEngine;
+extern FlightProfileEngine profileEngine;
+
 void write(int destination, int severity, const char *format, ...);
 void flushLogCacheToSD();
 void initLogCache();

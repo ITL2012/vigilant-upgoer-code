@@ -4,6 +4,7 @@
 #include "globals.h"
 #include "instruments.h"
 #include "buzzers.h"
+#include "flight_profile.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <stdlib.h>
@@ -33,6 +34,9 @@ extern SemaphoreHandle_t logCacheMutex;
 
 extern std::atomic<unsigned long long> systemBaseEpochMs;
 extern std::atomic<unsigned long> systemBaseMillis;
+
+extern const FlightProfile* const availableProfiles[];
+extern const uint8_t numAvailableProfiles;
 
 // ============================================================================
 // READY-PHASE MINIMAL HTML PAGE
@@ -201,7 +205,7 @@ void handleGetData() {
     sensors_ready = sharedTelemetry.sensors_ok;
     xSemaphoreGive(telemetryMutex);
 
-    char json[1400];
+    char json[1600];
     int len = snprintf(json, sizeof(json),
       "{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f,"
        "\"raw_alt\":%.2f,\"filtered_alt\":%.2f,\"vel_z\":%.2f,"
@@ -215,9 +219,12 @@ void handleGetData() {
        "\"qx\":%.4f,\"qy\":%.4f,\"qz\":%.4f,\"qw\":%.4f,"
        "\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
        "\"dt\":%.6f,\"log_drops\":%u,"
-       "\"servo0\":%.1f,\"servo1\":%.1f,\"servo2\":%.1f,\"servo3\":%.1f,"
-       "\"servo4\":%.1f,\"servo5\":%.1f,\"servo6\":%.1f,\"servo7\":%.1f,"
-       "\"servo_override\":%s}",
+        "\"servo0\":%.1f,\"servo1\":%.1f,\"servo2\":%.1f,\"servo3\":%.1f,"
+        "\"servo4\":%.1f,\"servo5\":%.1f,\"servo6\":%.1f,\"servo7\":%.1f,"
+        "\"servo_override\":%s,"
+        "\"profile_active\":%s,\"profile_name\":\"%s\","
+        "\"profile_step\":%u,\"profile_num_steps\":%u,\"profile_progress\":%.3f,"
+        "\"sp_roll\":%.2f,\"sp_pitch\":%.2f,\"sp_yaw\":%.2f}",
       r, p, y,
       ra, fa, vz,
       lat, lng,
@@ -239,7 +246,15 @@ void handleGetData() {
     sdReady ? "true" : "false",
     latestServoAngles[0], latestServoAngles[1], latestServoAngles[2], latestServoAngles[3],
       latestServoAngles[4], latestServoAngles[5], latestServoAngles[6], latestServoAngles[7],
-      servoOverrideActive ? "true" : "false"
+      servoOverrideActive ? "true" : "false",
+    profileEngine.isActive() ? "true" : "false",
+    profileEngine.getProfileName(),
+    profileEngine.getCurrentStep(),
+    profileEngine.getNumSteps(),
+    profileEngine.getStepProgress(),
+    profileEngine.getSetpointRoll(),
+    profileEngine.getSetpointPitch(),
+    profileEngine.getSetpointYaw()
     );
 
     if (len < 0 || len >= (int)sizeof(json)) {
@@ -524,6 +539,154 @@ void handleDeleteLog() {
 }
 
 // ============================================================================
+// FLIGHT PROFILE HTTP HANDLERS
+// ============================================================================
+
+void handleProfileList() {
+    String json = "{\"profiles\":[";
+    for (uint8_t i = 0; i < numAvailableProfiles; i++) {
+        if (i > 0) json += ",";
+        json += "{\"index\":" + String(i) +
+                ",\"name\":\"" + String(availableProfiles[i]->name) + "\"" +
+                ",\"steps\":" + String(availableProfiles[i]->numSteps) + "}";
+    }
+    json += "],\"active\":\"" + String(profileEngine.getProfileName()) + "\"";
+    json += ",\"step\":" + String(profileEngine.getCurrentStep());
+    json += ",\"progress\":" + String(profileEngine.getStepProgress(), 3);
+    json += "}";
+    serverPtr->send(200, "application/json", json);
+}
+
+void handleProfileStart() {
+    if (!serverPtr->hasArg("name") && !serverPtr->hasArg("index")) {
+        serverPtr->send(400, "text/plain", "Missing 'name' or 'index'");
+        return;
+    }
+
+    // New: accept raw JSON body to upload+start a profile inline
+    if (serverPtr->hasArg("plain") && serverPtr->arg("plain").length() > 0) {
+        JsonProfile p;
+        if (parseProfileJSON(serverPtr->arg("plain").c_str(), p)) {
+            const FlightProfile* fp = registerJsonProfile(p);
+            if (fp) {
+                profileEngine.startProfile(*fp);
+                serverPtr->send(200, "text/plain", "Started uploaded profile: " + String(p.name));
+                return;
+            }
+        }
+        serverPtr->send(400, "text/plain", "Invalid profile JSON");
+        return;
+    }
+
+    if (serverPtr->hasArg("index")) {
+        int idx = serverPtr->arg("index").toInt();
+        if (idx >= 0 && idx < numAvailableProfiles) {
+            profileEngine.startProfile(*availableProfiles[idx]);
+            serverPtr->send(200, "text/plain", "Started profile: " + String(availableProfiles[idx]->name));
+            return;
+        }
+        serverPtr->send(404, "text/plain", "Profile index out of range");
+        return;
+    }
+
+    String name = serverPtr->arg("name");
+    if (startProfileByName(name.c_str())) {
+        serverPtr->send(200, "text/plain", "Started profile: " + name);
+    } else {
+        serverPtr->send(404, "text/plain", "Profile not found: " + name);
+    }
+}
+
+void handleProfileStop() {
+    profileEngine.abortProfile();
+    serverPtr->send(200, "text/plain", "Profile aborted");
+}
+
+void handleProfileStatus() {
+    String json = "{";
+    json += "\"active\":" + String(profileEngine.isActive() ? "true" : "false");
+    json += ",\"name\":\"" + String(profileEngine.getProfileName()) + "\"";
+    json += ",\"step\":" + String(profileEngine.getCurrentStep());
+    json += ",\"numSteps\":" + String(profileEngine.getNumSteps());
+    json += ",\"progress\":" + String(profileEngine.getStepProgress(), 3);
+    json += ",\"setpointRoll\":" + String(profileEngine.getSetpointRoll(), 2);
+    json += ",\"setpointPitch\":" + String(profileEngine.getSetpointPitch(), 2);
+    json += ",\"setpointYaw\":" + String(profileEngine.getSetpointYaw(), 2);
+    json += "}";
+    serverPtr->send(200, "application/json", json);
+}
+
+// Upload a profile JSON to SD card (and register it)
+void handleProfileUpload() {
+    if (!serverPtr->hasArg("name") || !serverPtr->hasArg("json")) {
+        serverPtr->send(400, "text/plain", "Missing 'name' or 'json'");
+        return;
+    }
+    String name = serverPtr->arg("name");
+    String json = serverPtr->arg("json");
+
+    // Validate by parsing
+    JsonProfile p;
+    if (!parseProfileJSON(json.c_str(), p)) {
+        serverPtr->send(400, "text/plain", "Invalid profile JSON");
+        return;
+    }
+
+    if (!saveProfileToSD(name.c_str(), json.c_str())) {
+        serverPtr->send(500, "text/plain", "Failed to write to SD");
+        return;
+    }
+
+    // Register in runtime store
+    registerJsonProfile(p);
+    serverPtr->send(200, "text/plain", "Uploaded profile: " + name);
+}
+
+// List all profiles (flash + SD-loaded) with source
+void handleProfileListAll() {
+    String json = "{\"profiles\":[";
+    bool first = true;
+    for (uint8_t i = 0; i < numAvailableProfiles; i++) {
+        if (!first) json += ",";
+        first = false;
+        json += "{\"name\":\"" + String(availableProfiles[i]->name) + "\",\"steps\":" +
+                String(availableProfiles[i]->numSteps) + ",\"source\":\"flash\"}";
+    }
+    for (uint8_t i = 0; i < numLoadedProfiles; i++) {
+        if (!loadedProfiles[i].used) continue;
+        if (!first) json += ",";
+        first = false;
+        json += "{\"name\":\"" + String(loadedProfiles[i].json.name) + "\",\"steps\":" +
+                String(loadedProfiles[i].json.numSteps) + ",\"source\":\"sd\"}";
+    }
+    json += "],\"active\":\"" + String(profileEngine.getProfileName()) + "\"}";
+    serverPtr->send(200, "application/json", json);
+}
+
+// Delete an SD-loaded profile file
+void handleProfileDelete() {
+    if (!serverPtr->hasArg("name")) {
+        serverPtr->send(400, "text/plain", "Missing 'name'");
+        return;
+    }
+    String name = serverPtr->arg("name");
+    char full[64];
+    snprintf(full, sizeof(full), "%s/%s.json", PROFILE_STORE_PATH, name.c_str());
+
+    if (!SD.exists(full)) {
+        serverPtr->send(404, "text/plain", "Profile file not found on SD");
+        return;
+    }
+    SD.remove(full);
+
+    // Remove from runtime store
+    int idx = findLoadedProfile(name.c_str());
+    if (idx >= 0) loadedProfiles[idx].used = false;
+
+    serverPtr->send(200, "text/plain", "Deleted profile: " + name);
+}
+
+// ============================================================================
 // DYNAMIC ROUTE REGISTRATION
 // ============================================================================
 
@@ -564,6 +727,12 @@ void registerFullRoutes() {
     serverPtr->on("/serial_log", HTTP_GET, handleSerialLog);
     serverPtr->on("/download_log", HTTP_GET, handleDownloadLog);
     serverPtr->on("/delete_log", HTTP_POST, handleDeleteLog);
+    serverPtr->on("/profile_list", HTTP_GET, handleProfileListAll);
+    serverPtr->on("/profile_start", HTTP_POST, handleProfileStart);
+    serverPtr->on("/profile_stop", HTTP_POST, handleProfileStop);
+    serverPtr->on("/profile_status", HTTP_GET, handleProfileStatus);
+    serverPtr->on("/profile_upload", HTTP_POST, handleProfileUpload);
+    serverPtr->on("/profile_delete", HTTP_POST, handleProfileDelete);
     ElegantOTA.begin(serverPtr);
     Serial.println("[WIFI] Full dashboard routes registered");
 }

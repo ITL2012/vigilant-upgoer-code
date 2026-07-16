@@ -5,6 +5,7 @@
 
 #include "globals.h"
 #include "instruments.h"
+#include "flight_profile.h"
 #include <Arduino.h>
 #include <TinyGPSPlus.h>
 #include <SPI.h>
@@ -13,6 +14,8 @@
 
 // Declare external variables from main.cpp
 extern TinyGPSPlus gps;
+extern const FlightProfile* const availableProfiles[];
+extern const uint8_t numAvailableProfiles;
 extern SPIClass *hspi;
 extern HardwareSerial gpsSerial;
 extern uint32_t sdInitAttempts;
@@ -46,6 +49,12 @@ void debugCLI_printHelp() {
     Serial.println("  sd info           - Show SD card info");
     Serial.println("  servo <ch> <ang>  - Set servo angle (0-7, 60-120°)");
     Serial.println("  mode <transport|active_pad> - Set system mode");
+    Serial.println("  profile list      - List available flight profiles (flash + SD)");
+    Serial.println("  profile start <n> - Start profile by name (flash or SD)");
+    Serial.println("  profile stop      - Abort active profile");
+    Serial.println("  profile next      - Advance to next step (manual trigger)");
+    Serial.println("  profile reload    - Reload profiles from SD card");
+    Serial.println("  profile status    - Show active profile & setpoints");
     Serial.println("");
 }
 
@@ -259,6 +268,54 @@ void debugCLI_processCommand(String cmd) {
             } else {
                 Serial.println("[MODE] Instrument init failed - staying in TRANSPORT");
             }
+        }
+    }
+    else if (cmd == "profile list") {
+        Serial.printf("[PROFILE] %u flash + %u SD profiles:\n",
+                      (unsigned)numAvailableProfiles, (unsigned)numLoadedProfiles);
+        for (uint8_t i = 0; i < numAvailableProfiles; i++) {
+            Serial.printf("  [F%u] %s (%u steps)\n", i, availableProfiles[i]->name, availableProfiles[i]->numSteps);
+        }
+        for (uint8_t i = 0; i < numLoadedProfiles; i++) {
+            if (!loadedProfiles[i].used) continue;
+            Serial.printf("  [S%u] %s (%u steps)\n", i, loadedProfiles[i].json.name, loadedProfiles[i].json.numSteps);
+        }
+        if (profileEngine.isActive()) {
+            Serial.printf("[PROFILE] Active: '%s' step %u/%u (%.0f%%)\n",
+                profileEngine.getProfileName(), profileEngine.getCurrentStep(),
+                profileEngine.getNumSteps(), profileEngine.getStepProgress() * 100.0f);
+        } else {
+            Serial.println("[PROFILE] No active profile");
+        }
+    }
+    else if (cmd.startsWith("profile start ")) {
+        String name = cmd.substring(14);
+        name.trim();
+        if (startProfileByName(name.c_str())) {
+            Serial.printf("[PROFILE] Started '%s'\n", name.c_str());
+        } else {
+            Serial.printf("[PROFILE] Unknown profile '%s'. Type 'profile list'.\n", name.c_str());
+        }
+    }
+    else if (cmd == "profile reload") {
+        loadAllProfilesFromSD();
+        Serial.println("[PROFILE] Reloaded profiles from SD");
+    }
+    else if (cmd == "profile stop") {
+        profileEngine.abortProfile();
+    }
+    else if (cmd == "profile next") {
+        profileEngine.next();
+    }
+    else if (cmd == "profile status") {
+        if (profileEngine.isActive()) {
+            Serial.printf("[PROFILE] '%s' step %u/%u R%.1f P%.1f Y%.1f (%.0f%%)\n",
+                profileEngine.getProfileName(), profileEngine.getCurrentStep(),
+                profileEngine.getNumSteps(),
+                profileEngine.getSetpointRoll(), profileEngine.getSetpointPitch(),
+                profileEngine.getSetpointYaw(), profileEngine.getStepProgress() * 100.0f);
+        } else {
+            Serial.println("[PROFILE] No active profile (level stabilization)");
         }
     }
     else if (cmd.length() > 0) {
