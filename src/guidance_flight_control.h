@@ -110,6 +110,16 @@ struct SurfaceWeights {
     float yaw;
 };
 
+//   Axis convention (rocketeer's view; matches main.cpp extract):
+//     roll  = spin about the rocket's long/nose axis (Z up at launch).
+//             A "roll 180" profile step spins the rocket in place; the
+//             nose vector stays pointing up. Driven here by the aft
+//             flaps (differential deflection -> barrel-roll spin).
+//     pitch = tilt forward/back (nose up/down) = rotation about Y.
+//             Driven by the forward canards (symmetric deflection).
+//     yaw   = swing left/right (nose sideways) = rotation about X.
+//             Driven by the side canards 2/3 (symmetric deflection).
+//
 //   Index  Surface           Primary Role      Sign Convention
 //   0      Canard 0 (Fwd-L)  Pitch+Roll        +pitch +roll
 //   1      Canard 1 (Fwd-R)  Pitch+Roll        -pitch +roll

@@ -298,11 +298,12 @@ Also reads BMP580 pressure (hPa) and temperature (°C) into `latestBaroPressure`
 ```cpp
 readIMU(qx, qy, qz, qw, lin_ax, lin_ay, lin_az)
 ```
-On success, updates `latestQx..latestQw`, `latestAx..latestAz`, and computes Euler angles:
+On success, updates `latestQx..latestQw`, `latestAx..latestAz`, and computes Euler angles using the **rocket body-frame (rocketeer) convention** — the IMU is mounted with its Z-axis up along the rocket's nose:
+
 ```
-roll  = atan2(2*(qw*qx + qy*qz), 1 - 2*(qx² + qy²)) * 180/π
-pitch = asin(2*(qw*qy - qz*qx)) * 180/π
-yaw   = atan2(2*(qw*qz + qx*qy), 1 - 2*(qy² + qz²)) * 180/π
+roll  = atan2(2*(qw*qz + qx*qy), 1 - 2*(qy² + qz²)) * 180/π   # rotation about Z (nose axis) -> spin-in-place
+pitch = asin (2*(qw*qy - qz*qx))                  * 180/π   # rotation about Y -> nose up/down
+yaw   = atan2(2*(qw*qx + qy*qz), 1 - 2*(qx² + qy²)) * 180/π   # rotation about X -> nose left/right
 ```
 
 #### c. Sensor Fusion

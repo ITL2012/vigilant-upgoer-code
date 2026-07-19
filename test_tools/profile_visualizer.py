@@ -7,7 +7,13 @@ View, edit, and export flight profiles (attitude trajectories) in 3D.
 The trajectory is rendered as a 3D rocket orientation path: starting upright
 at the origin, each profile step rotates the rocket's body frame by the
 step's (roll, pitch, yaw) target. The 3D path shows the rocket's nose vector
-over time, so you can literally see "rotate 180, pitch 20, then flatten".
+over time, so you can literally see "roll 180, pitch 20, then flatten".
+
+Axis convention (rocketeer's view):
+  - roll  -> spin about the nose axis (Z, up). roll=180 spins in place;
+             the NOSE VECTOR DOES NOT CHANGE.
+  - pitch -> tilt about body Y (forward/back). Tilts nose in X-Z plane.
+  - yaw   -> swing about body X (sideways). Tilts nose in Y-Z plane.
 
 Features:
   - Load/save the SAME JSON schema the firmware uses
@@ -31,6 +37,7 @@ JSON schema (matches firmware /src/flight_profile.h):
 """
 
 import sys
+import os
 import json
 import math
 import argparse
@@ -43,6 +50,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib import animation
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d proj)
+from matplotlib.cm import viridis
 
 from PyQt5.QtWidgets import (
     QApplication,
@@ -76,16 +84,46 @@ def deg2rad(d):
 
 
 def quat_from_euler(roll_deg, pitch_deg, yaw_deg):
-    """Z-Y-X (yaw-pitch-roll) intrinsic -> quaternion [w,x,y,z]."""
-    r, p, y = deg2rad(roll_deg), deg2rad(pitch_deg), deg2rad(yaw_deg)
-    cr, sr = math.cos(r / 2), math.sin(r / 2)
-    cp, sp = math.cos(p / 2), math.sin(p / 2)
-    cy, sy = math.cos(y / 2), math.sin(y / 2)
-    w = cr * cp * cy + sr * sp * sy
-    x = sr * cp * cy - cr * sp * sy
-    y_ = cr * sp * cy + sr * cp * sy
-    z = cr * cp * sy - sr * sp * cy
-    return np.array([w, x, y_, z])
+    """
+    Rocket-body convention for the visualizer.
+
+    The rocket launches with its nose along +Z (up). The firmware's
+    roll/pitch/yaw are interpreted in the *rocketeer's* sense:
+
+      - roll  : rotation about the body's long (nose) axis = Z
+                -> a roll of 180 deg spins the rocket in place;
+                   the NOSE VECTOR DOES NOT CHANGE.
+      - pitch : rotation about the body's Y axis (forward/back tilt)
+                -> tilts the nose in the X-Z plane.
+      - yaw   : rotation about the body's X axis (sideways swing)
+                -> tilts the nose in the Y-Z plane.
+
+    The composite rotation is applied as Yaw (about X), then Pitch
+    (about Y), then Roll (about Z). Expressed as a quaternion, this is
+    the X-Y-Z extrinsic convention (== Z-Y-X intrinsic if we relabel
+    the firmware axes), but the implementation below just composes the
+    three single-axis quaternions directly so the intent is explicit
+    and unambiguous.
+
+    Returns quaternion [w, x, y, z].
+    """
+    r = deg2rad(roll_deg)
+    p = deg2rad(pitch_deg)
+    y = deg2rad(yaw_deg)
+
+    # Single-axis quaternions
+    #   yaw   about X:  q_yaw   = (cos(y/2),  sin(y/2), 0, 0)
+    #   pitch about Y:  q_pitch = (cos(p/2), 0, sin(p/2), 0)
+    #   roll  about Z:  q_roll  = (cos(r/2), 0, 0, sin(r/2))
+    q_yaw   = np.array([math.cos(y / 2),  math.sin(y / 2), 0.0,  0.0])
+    q_pitch = np.array([math.cos(p / 2), 0.0, math.sin(p / 2),  0.0])
+    q_roll  = np.array([math.cos(r / 2), 0.0, 0.0, math.sin(r / 2)])
+
+    # Compose: first yaw (outer), then pitch, then roll (innermost).
+    # q_total = q_roll * q_pitch * q_yaw  (applied to a vector v as
+    # rotate(rotate(rotate(v, yaw), pitch), roll)).
+    q = quat_mult(q_roll, quat_mult(q_pitch, q_yaw))
+    return q
 
 
 def quat_mult(a, b):
@@ -132,7 +170,13 @@ def default_profile():
 
 def load_profile(path):
     with open(path, "r") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {path}: {e}")
+    data.setdefault("name", "PROFILE")
+    data.setdefault("loop", False)
+    data.setdefault("steps", [])
     # normalize step keys
     for s in data.get("steps", []):
         s.setdefault("duration", 0.0)
@@ -200,8 +244,30 @@ class TrajectoryCanvas(FigureCanvas):
         self.parent = parent
         self.traj = []
         self.anim = None
+        self.anim_line = None
+        self.anim_marker = None
+
+    def stop_animation(self):
+        """Stop any running animation and remove its transient artists."""
+        if self.anim is not None:
+            try:
+                self.anim.event_source.stop()
+            except Exception:
+                pass
+            self.anim = None
+        for artist_attr in ("anim_line", "anim_marker"):
+            artist = getattr(self, artist_attr, None)
+            if artist is not None:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+                setattr(self, artist_attr, None)
 
     def draw_trajectory(self, data):
+        # Stop any running animation first; clearing the axes would
+        # otherwise invalidate the animation's line/marker handles.
+        self.stop_animation()
         self.traj = build_trajectory(data)
         self.ax.clear()
         self.ax.set_xlabel("X (body right)")
@@ -217,9 +283,6 @@ class TrajectoryCanvas(FigureCanvas):
         ys = [p[4][1] for p in self.traj]
         zs = [p[4][2] for p in self.traj]
 
-        # Color by progress
-        from matplotlib.cm import viridis
-
         self.ax.plot(xs, ys, zs, color="#00ffaa", linewidth=2, zorder=1)
         # Scatter with time-coloring
         ts = np.linspace(0, 1, len(self.traj))
@@ -228,6 +291,7 @@ class TrajectoryCanvas(FigureCanvas):
         # Draw rocket body glyphs at each step boundary
         steps = data.get("steps", [])
         t_acc = 0.0
+        max_t = self.traj[-1][0] if self.traj else 1.0
         for step in steps:
             dur = step.get("duration", 0.0)
             trig = step.get("trigger", "time")
@@ -238,7 +302,7 @@ class TrajectoryCanvas(FigureCanvas):
                 key=lambda i: abs(self.traj[i][0] - t_acc),
             )
             _, r, p, yw, nose = self.traj[idx]
-            self._draw_rocket_glyph(r, p, yw, nose, t_acc / max(1e-6, self.traj[-1][0]))
+            self._draw_rocket_glyph(r, p, yw, nose, t_acc / max(1e-6, max_t))
             t_acc += nominal
 
         # Axes limits fixed for stable view
@@ -249,12 +313,9 @@ class TrajectoryCanvas(FigureCanvas):
         self.draw()
 
     def _draw_rocket_glyph(self, roll, pitch, yaw, nose, color_t):
-        from matplotlib.cm import viridis
-
         q = quat_from_euler(roll, pitch, yaw)
         # body axis (tail -> nose)
         tail = -nose
-        up = rotate_vector(q, np.array([0.0, 1.0, 0.0]))
         # draw a short stick: tail (scaled) to nose
         self.ax.plot(
             [tail[0] * 0.6, nose[0] * 1.0],
@@ -263,13 +324,15 @@ class TrajectoryCanvas(FigureCanvas):
             color=viridis(color_t),
             linewidth=3,
         )
-        # fins hint
+        # fins hint: three fins glyphs perpendicular to the nose, rotated
+        # about the nose axis by 'roll'. Use body-frame X (the axis roll
+        # leaves invariant) and a perpendicular axis, then rotate both into
+        # the world frame with q so the fins visually spin with roll.
+        body_x = rotate_vector(q, np.array([1.0, 0.0, 0.0]))
+        body_y = rotate_vector(q, np.array([0.0, 1.0, 0.0]))
         for ang in [0, 120, 240]:
             a = deg2rad(ang)
-            fin = tail * 0.6 + 0.25 * (
-                math.cos(a) * np.array([1.0, 0.0, 0.0])
-                + math.sin(a) * np.array([0.0, 1.0, 0.0])
-            )
+            fin = tail * 0.6 + 0.25 * (math.cos(a) * body_x + math.sin(a) * body_y)
             self.ax.plot(
                 [tail[0] * 0.6, fin[0]],
                 [tail[1] * 0.6, fin[1]],
@@ -288,7 +351,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("ISAAC-L Flight Profile Visualizer")
         self.resize(1100, 720)
-        self.data = default_profile() if initial is None else load_profile(initial)
+        if initial is None:
+            self.data = default_profile()
+        else:
+            try:
+                self.data = load_profile(initial)
+            except Exception as e:
+                print(f"WARNING: could not load {initial}: {e}", file=sys.stderr)
+                QMessageBox.warning(self, "Load failed",
+                                    f"Could not load {initial}:\n{e}\n\nLoading default profile.")
+                self.data = default_profile()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -497,9 +569,17 @@ class MainWindow(QMainWindow):
             self, "Open profile", "", "JSON (*.json)"
         )
         if path:
-            self.data = load_profile(path)
+            try:
+                self.data = load_profile(path)
+            except Exception as e:
+                QMessageBox.warning(self, "Load failed", str(e))
+                return
+            self.edit_name.blockSignals(True)
             self.edit_name.setText(self.data.get("name", ""))
+            self.edit_name.blockSignals(False)
+            self.chk_loop.blockSignals(True)
             self.chk_loop.setChecked(self.data.get("loop", False))
+            self.chk_loop.blockSignals(False)
             self._refresh_list()
             self._refresh_canvas()
 
@@ -513,9 +593,23 @@ class MainWindow(QMainWindow):
 
     def _export_sd(self):
         """Open a file dialog to write into the mounted SD /profiles folder."""
+        default_name = self.data.get("name", "profile") + ".json"
+        # Try the firmware SD mount path first; fall back to home dir if missing
+        candidates = [
+            "/media/ISAAC/profiles/" + default_name,
+            "/Volumes/ISAAC/profiles/" + default_name,
+            default_name,
+        ]
+        for c in candidates:
+            parent = os.path.dirname(c) or "."
+            if os.path.isdir(parent):
+                default = c
+                break
+        else:
+            default = candidates[-1]
         path, _ = QFileDialog.getSaveFileName(
             self, "Export to SD profiles folder",
-            "/media/ISAAC/profiles/" + self.data.get("name", "profile") + ".json",
+            default,
             "JSON (*.json)",
         )
         if path:
@@ -539,10 +633,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Upload failed", str(e))
 
     def toggle_animation(self):
-        if self.canvas.anim and self.canvas.anim.event_source:
-            self.canvas.anim.event_source.stop()
-            self.canvas.anim = None
+        if self.canvas.anim is not None:
+            self.canvas.stop_animation()
             self.btn_play.setText("Animate")
+            # Redraw the clean static trajectory (without the animation overlay)
+            self._refresh_canvas()
             return
         self.btn_play.setText("Stop")
         self._animate()
@@ -552,21 +647,74 @@ class MainWindow(QMainWindow):
         if not traj:
             return
         ax = self.canvas.ax
-        (line,) = ax.plot([], [], [], color="red", linewidth=3)
+        # Clean up any previous animation artists before creating new ones
+        self.canvas.stop_animation()
+
+        # Animated overlay artists:
+        #   - line:    traced nose vector path so far (red)
+        #   - fuselage: rocket body stick (tail -> nose), shows pitch/yaw orientation
+        #   - lateral:  cross-bar perpendicular to the body (shows ROLL rotation)
+        (line,) = ax.plot([], [], [], color="red", linewidth=3, zorder=5)
+        (marker,) = ax.plot([], [], [], "o", color="red", markersize=8, zorder=6)
+        (fuselage,) = ax.plot([], [], [], color="black", linewidth=4, zorder=7)
+        (lateral,) = ax.plot([], [], [], color="black", linewidth=2, zorder=8)
+        self.canvas.anim_line = line
+        self.canvas.anim_marker = marker
+        self.canvas.anim_fuselage = fuselage
+        self.canvas.anim_lateral = lateral
         n = len(traj)
 
+        # Dynamic frame count: at least 30, scaled to trajectory length
+        frames = max(30, min(n, 300))
+
         def update(frame):
-            end = int((frame + 1) / 30.0 * n) + 1
-            end = min(end, n)
+            # Map a frame number to a position along the trajectory
+            end = int((frame + 1) / float(frames) * n)
+            end = max(1, min(end, n))
+            idx = end - 1  # current trajectory sample
+
+            # 1) Traced nose-vector path so far (red line)
             xs = [p[4][0] for p in traj[:end]]
             ys = [p[4][1] for p in traj[:end]]
             zs = [p[4][2] for p in traj[:end]]
             line.set_data(xs, ys)
             line.set_3d_properties(zs)
-            return (line,)
+
+            # 2) Marker at the current tip of the path
+            tip = traj[idx][4]
+            marker.set_data([tip[0]], [tip[1]])
+            marker.set_3d_properties([tip[2]])
+
+            # 3) Animate a rocket glyph at the current sample so ROLL is
+            #    visible (the nose vector alone doesn't change under roll,
+            #    but the cross-bar spins around the body axis).
+            t, roll, pitch, yaw, nose = traj[idx]
+            q = quat_from_euler(roll, pitch, yaw)
+            # Body axis: tail -> nose (length scaled to 0.4 so the glyph
+            # is visible inside the [-1.2, 1.2] view box).
+            nose_tip = nose * 0.40
+            tail = -nose * 0.40
+            fuselage.set_data([tail[0], nose_tip[0]],
+                              [tail[1], nose_tip[1]])
+            fuselage.set_3d_properties([tail[2], nose_tip[2]])
+            # Lateral cross-bar: two body-frame perpendicular axes (X, Y)
+            # rotated by q. As roll advances, both spin around the nose.
+            body_x = rotate_vector(q, np.array([0.25, 0.0, 0.0]))
+            body_y = rotate_vector(q, np.array([0.0, 0.25, 0.0]))
+            cx, cy, cz = (nose_tip[0] + tail[0]) / 2.0, \
+                         (nose_tip[1] + tail[1]) / 2.0, \
+                         (nose_tip[2] + tail[2]) / 2.0
+            lateral.set_data([cx - body_x[0] + body_y[0],
+                              cx + body_x[0] - body_y[0]],
+                             [cy - body_x[1] + body_y[1],
+                              cy + body_x[1] - body_y[1]])
+            lateral.set_3d_properties([cz - body_x[2] + body_y[2],
+                                      cz + body_x[2] - body_y[2]])
+            return (line, marker, fuselage, lateral)
 
         self.canvas.anim = animation.FuncAnimation(
-            self.canvas.fig, update, frames=30, interval=50, blit=False, repeat=self.chk_loop.isChecked()
+            self.canvas.fig, update, frames=frames, interval=50,
+            blit=False, repeat=self.chk_loop.isChecked()
         )
         self.canvas.draw()
 

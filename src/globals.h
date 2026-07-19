@@ -235,21 +235,42 @@ void initLogCache();
 
 void userCustomSetup();
 
+// ----------------------------------------------------------------------------
+// Rocket body-frame Euler extraction (rocketeer's convention).
+//
+// The BNO085 is mounted with its Z-axis up, ALONG THE ROCKET'S NOSE, so the
+// rocket's long/nose axis equals the IMU's Z axis. We assign:
+//     roll  = rotation about the nose axis = rotation about Z
+//     pitch = tilt forward/back             = rotation about Y
+//     yaw   = swing left/right              = rotation about X
+//
+// This MUST match the inline computation in main.cpp's loop() and the servo
+// mixing matrix in guidance_flight_control.h (aft flaps are "roll primary").
+// Undo the previous (stale) labeling that treated roll as rotation about X,
+// which would have flipped the nose to -Z on a "roll 180" maneuver.
+//
+// Args are the quaternion components (r=w, i=x, j=y, k=z).
+// ----------------------------------------------------------------------------
 void convertQuaternionToEuler(float r, float i, float j, float k) {
-    float ysqr = j * j;
+    float isqr = i * i;
+    float jsqr = j * j;
+    float ksqr = k * k;
 
-    float t0 = +2.0f * (r * i + j * k);
-    float t1 = +1.0f - 2.0f * (i * i + ysqr);
-    current_pitch = atan2(t0, t1) * RAD_TO_DEG;
+    // roll = rotation about Z (nose axis): atan2 of (qw*qz + qx*qy) and (1 - 2(qy^2 + qz^2))
+    float r0 = +2.0f * (r * k + i * j);
+    float r1 = +1.0f - 2.0f * (jsqr + ksqr);
+    current_roll = atan2(r0, r1) * RAD_TO_DEG;
 
-    float t2 = +2.0f * (r * j - k * i);
-    t2 = t2 > 1.0f ? 1.0f : t2;
-    t2 = t2 < -1.0f ? -1.0f : t2;
-    current_roll = asin(t2) * RAD_TO_DEG;
+    // pitch = rotation about Y (forward/back tilt): asin(2(qw*qy - qz*qx))
+    float p = +2.0f * (r * j - k * i);
+    if (p > 1.0f)  p = 1.0f;
+    if (p < -1.0f) p = -1.0f;
+    current_pitch = asin(p) * RAD_TO_DEG;
 
-    float t3 = +2.0f * (r * k + i * j);
-    float t4 = +1.0f - 2.0f * (ysqr + k * k);
-    current_yaw = atan2(t3, t4) * RAD_TO_DEG;
+    // yaw = rotation about X (sideways swing): atan2 of (qw*qx + qy*qz) and (1 - 2(qx^2 + qy^2))
+    float y0 = +2.0f * (r * i + j * k);
+    float y1 = +1.0f - 2.0f * (isqr + jsqr);
+    current_yaw = atan2(y0, y1) * RAD_TO_DEG;
 }
 
 #endif // GUIDANCE_GLOBALS_H

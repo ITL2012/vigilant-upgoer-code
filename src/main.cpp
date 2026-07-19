@@ -315,9 +315,30 @@ void loop() {
         if (readIMU(qx, qy, qz, qw, lin_ax, lin_ay, lin_az)) {
             latestQx = qx; latestQy = qy; latestQz = qz; latestQw = qw;
             latestAx = lin_ax; latestAy = lin_ay; latestAz = lin_az;
-            roll  = atan2(2.0f * (qw * qx + qy * qz), 1.0f - 2.0f * (qx * qx + qy * qy)) * 180.0f / M_PI;
+            // ----------------------------------------------------------------------
+            // Rocket body-frame Euler extraction (rocketeer's convention).
+            //
+            // The BNO085 is mounted with its Z-axis up, ALONG THE ROCKET'S NOSE.
+            // Therefore the rocket's long/nose axis is the IMU's Z axis:
+            //     roll  = rotation about the nose axis = rotation about Z
+            //     pitch = tilt forward/back             = rotation about Y
+            //     yaw   = swing left/right              = rotation about X
+            //
+            // This matches:
+            //   - the servo mixing matrix in guidance_flight_control.h
+            //     (aft flaps are "roll primary", which spin the rocket in place),
+            //   - the python profile_visualizer.py convention, so a profile
+            //     step with "roll":180 spins the rocket in place rather than
+            //     flipping its nose down through -Z.
+            //
+            // The three formulas below are the standard aerospace ZYX
+            // intrinsic decomposition, but the labels are assigned to the
+            // physical rocket axes (roll->Z, pitch->Y, yaw->X), NOT the raw
+            // IMU axis names.
+            // ----------------------------------------------------------------------
+            roll  = atan2(2.0f * (qw * qz + qx * qy), 1.0f - 2.0f * (qy * qy + qz * qz)) * 180.0f / M_PI;
             pitch = asin(2.0f * (qw * qy - qz * qx)) * 180.0f / M_PI;
-            yaw   = atan2(2.0f * (qw * qz + qx * qy), 1.0f - 2.0f * (qy * qy + qz * qz)) * 180.0f / M_PI;
+            yaw   = atan2(2.0f * (qw * qx + qy * qz), 1.0f - 2.0f * (qx * qx + qy * qy)) * 180.0f / M_PI;
         }
 
         updateRocketFusion(lin_ax, lin_ay, lin_az, qx, qy, qz, qw, raw_altitude, previous_altitude, dt);

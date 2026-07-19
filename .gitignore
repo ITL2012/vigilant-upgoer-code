@@ -10,6 +10,8 @@
 .vscode/launch.json
 .vscode/ipch/
 
+test_tools/__pycache__/
+
 # Operating system files
 .DS_Store
 Thumbs.db
