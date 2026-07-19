@@ -7,14 +7,11 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <stdlib.h>
-#include <SD.h>
+#include <SD_MMC.h>
 #include <FS.h>
 #include <esp_task_wdt.h>
 #include "index.html"
 #include <ElegantOTA.h>
-
-// Reference to the HSPI instance declared in main.cpp
-extern SPIClass *hspi;
 
 WebServer* serverPtr = nullptr;
 TaskHandle_t wifiServerTaskHandle = NULL;
@@ -215,6 +212,7 @@ void handleGetData() {
        "\"qx\":%.4f,\"qy\":%.4f,\"qz\":%.4f,\"qw\":%.4f,"
        "\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
        "\"dt\":%.6f,\"log_drops\":%u,"
+       "\"imu_ok\":%s,\"baro_ok\":%s,\"gps_ok\":%s,\"sd_ready\":%s,"
        "\"servo0\":%.1f,\"servo1\":%.1f,\"servo2\":%.1f,\"servo3\":%.1f,"
        "\"servo4\":%.1f,\"servo5\":%.1f,\"servo6\":%.1f,\"servo7\":%.1f,"
        "\"servo_override\":%s}",
@@ -514,11 +512,11 @@ void handleSerialLog() {
 }
 
 void handleDownloadLog() {
-    if (!SD.exists(LOG_FILE_PATH)) {
+    if (!SD_MMC.exists(LOG_FILE_PATH)) {
         serverPtr->send(404, "text/plain", "No flight log found.");
         return;
     }
-    File file = SD.open(LOG_FILE_PATH, FILE_READ);
+    File file = SD_MMC.open(LOG_FILE_PATH, FILE_READ);
     if (!file) {
         serverPtr->send(500, "text/plain", "Failed to open log file.");
         return;
@@ -528,9 +526,9 @@ void handleDownloadLog() {
 }
 
 void handleDeleteLog() {
-    if (SD.exists("/flight_log.csv")) {
-        SD.remove("/flight_log.csv");
-        File file = SD.open("/flight_log.csv", FILE_WRITE);
+    if (SD_MMC.exists("/flight_log.csv")) {
+        SD_MMC.remove("/flight_log.csv");
+        File file = SD_MMC.open("/flight_log.csv", FILE_WRITE);
         if (file) {
             file.println("timestamp_ms,roll,pitch,yaw,raw_alt,filtered_alt,vel_z,"
                          "acc_x,acc_y,acc_z,phase,"

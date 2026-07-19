@@ -17,7 +17,7 @@ float current_pitch;
 float current_roll;
 float current_yaw;
 
-static constexpr bool debugMode = true;
+static constexpr bool debugMode = false;
 
 static constexpr bool enableBuzzer = true;
 static constexpr bool stabilizationMode = true;
@@ -55,13 +55,18 @@ static constexpr int BNO_INT = 8;
 static constexpr int BNO_RST = 14;
 
 
-static constexpr int SD_CS     = 21;
+// SD card in SDMMC mode (DAT0, CMD, CLK, DAT3 per PCB schematic)
+static constexpr int SDMMC_CLK  = 42;
+static constexpr int SDMMC_CMD  = 15;
+static constexpr int SDMMC_D0   = 47;
+static constexpr int SDMMC_D3   = 23;
+// HSPI pins (no longer used for SD — SD uses SDMMC now)
 static constexpr int HSPI_MISO = 37;
 static constexpr int HSPI_MOSI = 35;
 static constexpr int HSPI_CLK  = 36;
 
 static constexpr int I2C_SDA      = 1;
-static constexpr int I2C_SCL      = 3;
+static constexpr int I2C_SCL      = 2;
 static constexpr unsigned long I2C_SPEED = 400000UL;
 static constexpr uint8_t PCA9685_ADDR = 0x40;
 

@@ -5,12 +5,10 @@
 #include "instruments.h"
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
-#include <SD.h>
+#include <SD_MMC.h>
 #include <stdarg.h>
 
 // Forward declarations for externs defined in main.cpp
-class SPIClass;
-extern SPIClass *hspi;
 extern HardwareSerial gpsSerial;
 extern QueueHandle_t sdLogQueue;
 extern char serialLogBuffer[];
@@ -38,6 +36,8 @@ bool sdReady = false;
 static StaticQueue_t *sdLogQueueStatic = NULL;
 static uint8_t *sdLogQueueStorage = NULL;
 
+static constexpr size_t INTERNAL_RAM_QUEUE_LEN = 200;
+
 QueueHandle_t createPSRAMBackedQueue(size_t queueLength, size_t itemSize) {
     StaticQueue_t* queueStatic = static_cast<StaticQueue_t*>(
         heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
@@ -45,9 +45,9 @@ QueueHandle_t createPSRAMBackedQueue(size_t queueLength, size_t itemSize) {
 
     if (queueStatic == NULL) {
         controlAllocFailures++;
-        Serial.printf("[WARN] PSRAM Queue: Internal control allocation failed (count=%u). Falling back to standard queue. FreeHeap=%u\n",
+        Serial.printf("[WARN] PSRAM Queue: Internal control allocation failed (count=%u). Falling back to small internal queue. FreeHeap=%u\n",
                       controlAllocFailures, esp_get_free_heap_size());
-        return xQueueCreate(queueLength, itemSize);
+        return xQueueCreate(INTERNAL_RAM_QUEUE_LEN, itemSize);
     }
 
     uint8_t* queueStorage = static_cast<uint8_t*>(
@@ -57,9 +57,9 @@ QueueHandle_t createPSRAMBackedQueue(size_t queueLength, size_t itemSize) {
     if (queueStorage == NULL) {
         psramAllocFailures++;
         heap_caps_free(queueStatic);
-        Serial.printf("[WARN] PSRAM Queue: PSRAM allocation failed (count=%u). FreeHeap=%u FreePSRAM=%u\n",
+        Serial.printf("[WARN] PSRAM Queue: PSRAM allocation failed (count=%u). FreeHeap=%u FreePSRAM=%u. Falling back to small internal queue.\n",
                       psramAllocFailures, esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-        return xQueueCreate(queueLength, itemSize);
+        return xQueueCreate(INTERNAL_RAM_QUEUE_LEN, itemSize);
     }
 
     QueueHandle_t queue = xQueueCreateStatic(queueLength, itemSize, queueStorage, queueStatic);
@@ -68,9 +68,9 @@ QueueHandle_t createPSRAMBackedQueue(size_t queueLength, size_t itemSize) {
         queueCreateFailures++;
         heap_caps_free(queueStorage);
         heap_caps_free(queueStatic);
-        Serial.printf("[ERROR] PSRAM Queue: Static queue creation failed (count=%u). Falling back to standard queue. FreeHeap=%u FreePSRAM=%u\n",
+        Serial.printf("[ERROR] PSRAM Queue: Static queue creation failed (count=%u). Falling back to small internal queue. FreeHeap=%u FreePSRAM=%u\n",
                       queueCreateFailures, esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-        return xQueueCreate(queueLength, itemSize);
+        return xQueueCreate(INTERNAL_RAM_QUEUE_LEN, itemSize);
     }
 
     psramAllocatedBytes = queueLength * itemSize;
@@ -131,7 +131,7 @@ void flushLogCacheToSD() {
         return;
     }
     
-    File file = SD.open(SYSTEM_LOG_FILE_PATH, FILE_APPEND);
+    File file = SD_MMC.open(SYSTEM_LOG_FILE_PATH, FILE_APPEND);
     if (file) {
         size_t total = (logCacheHead >= logCacheTail) ? 
             (logCacheHead - logCacheTail) : (LOG_CACHE_SIZE - logCacheTail + logCacheHead);
@@ -171,7 +171,7 @@ void write(int destination, int severity, const char *format, ...) {
 
     if (destination == LOG_SD || destination == LOG_BOTH) {
         if (sdReady) {
-            File file = SD.open(SYSTEM_LOG_FILE_PATH, FILE_APPEND);
+    File file = SD_MMC.open(SYSTEM_LOG_FILE_PATH, FILE_APPEND);
             if (file) {
                 file.println(output);
                 file.close();
@@ -208,17 +208,31 @@ void SDInit() {
     sdReady = false;
     sdInitAttempts++;
 
-    if (SD.begin(SD_CS, *hspi)) {
-        sdReady = true;
-        Serial.println("[OK] SD Card Initialized.");
-    } else {
+    // Do NOT use enable5v() — 5V pin conflicts with I2C_SCL and is only for servos
+
+    // Configure SDMMC pins for 1-bit mode
+    // CLK=42, CMD=15 (pull-up), D0=47 (pull-up) per PCB schematic
+    SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0);
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+            if (SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
+            sdReady = true;
+            Serial.println("[OK] SD Card Initialized (SDMMC 1-bit)");
+            break;
+        }
         sdInitFailures++;
-        SD.end();
+        Serial.printf("[WARN] SD init attempt %d/3 failed\n", attempt + 1);
+        SD_MMC.end();
+        delay(100);
+    }
+
+    if (!sdReady) {
+        Serial.println("[WARN] SD Card not available after 3 attempts");
         return;
     }
 
-if (!SD.exists(LOG_FILE_PATH)) {
-        File file = SD.open(LOG_FILE_PATH, FILE_WRITE);
+if (!SD_MMC.exists(LOG_FILE_PATH)) {
+        File file = SD_MMC.open(LOG_FILE_PATH, FILE_WRITE);
         if (file) {
             file.println("timestamp_ms,epoch_ms,roll,pitch,yaw,raw_alt,filtered_alt,vel_z,"
                          "acc_x,acc_y,acc_z,phase,"
@@ -232,8 +246,8 @@ if (!SD.exists(LOG_FILE_PATH)) {
         }
     }
 
-    if (!SD.exists(SYSTEM_LOG_FILE_PATH)) {
-        File file = SD.open(SYSTEM_LOG_FILE_PATH, FILE_WRITE);
+    if (!SD_MMC.exists(SYSTEM_LOG_FILE_PATH)) {
+        File file = SD_MMC.open(SYSTEM_LOG_FILE_PATH, FILE_WRITE);
         if (file) {
             file.println("--- SYSTEM LOG INITIALIZED ---");
             file.close();
@@ -295,7 +309,7 @@ void SDWriterTask(void *pvParameters) {
             logFile.close();
             fileOpen = false;
         }
-        logFile = SD.open(LOG_FILE_PATH, FILE_APPEND);
+        logFile = SD_MMC.open(LOG_FILE_PATH, FILE_APPEND);
         if (logFile) {
             fileOpen = true;
             return true;
@@ -309,6 +323,9 @@ void SDWriterTask(void *pvParameters) {
         sdReady = false;
     }
 
+    unsigned long lastReinitMs = 0;
+    const unsigned long REINIT_INTERVAL_MS = 15000;
+
     for (;;) {
         // Block up to 1s for a packet
         if (xQueueReceive(sdLogQueue, &packet, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -316,30 +333,30 @@ void SDWriterTask(void *pvParameters) {
                 continue;  // packet dropped, will be counted by pushLogPacket
             }
 
-            // Ensure file is open; attempt recovery if needed
-            if (!fileOpen) {
+        // Ensure file is open; attempt recovery if needed
+        if (!fileOpen) {
+            unsigned long now = millis();
+            if (now - lastReinitMs < REINIT_INTERVAL_MS) {
+                continue;
+            }
+            lastReinitMs = now;
+            sdWriteFailures++;
+            SD_MMC.end();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0);
+        if (SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
+                sdReady = true;
                 if (!openLogFile()) {
-                    sdWriteFailures++;
-                    // Full SD re-init attempt
-                    SD.end();
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    if (SD.begin(SD_CS, *hspi)) {
-                        sdReady = true;
-                        if (!openLogFile()) {
-                            sdReady = false;
-                            continue;
-                        }
-                    } else {
-                        sdReady = false;
-                        continue;
-                    }
-                } else {
                     sdReady = false;
                     continue;
                 }
+            } else {
+                sdReady = false;
+                continue;
             }
+        }
 
-            // Write the packet
+        // Write the packet
             logFile.printf("%u,%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,"
                            "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
                            "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"

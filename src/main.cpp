@@ -60,7 +60,6 @@ unsigned long lastLogTime = 0;
 std::atomic<unsigned long> lastIMUReport_ms(0);
 std::atomic<uint32_t> logDropCount(0);
 
-SPIClass *hspi = nullptr;  // Initialized in setup() — NOT a global constructor
 HardwareSerial gpsSerial(2);
 TinyGPSPlus gps;
 Adafruit_PWMServoDriver pwm(PCA9685_ADDR);
@@ -97,9 +96,7 @@ void setup() {
 
 
     esp_task_wdt_init(WDT_TIMEOUT_S, true);
-    esp_task_wdt_add(NULL);
-
-    // Do not chirp the buzzer until after hardware is initialized
+    // loopTask was auto-registered by the Arduino core; feed it during long ops
     lastMicros = micros();
 
     // Create RTOS synchronization primitives
@@ -114,7 +111,19 @@ void setup() {
         }
     }
 
+    // ---- SPI Bus Initialization (VSPI for BNO085, BMP580) ----
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing SPI bus...");
+    SPI.begin(VSPI_CLK, VSPI_MISO, VSPI_MOSI);
+    delay(100);
+    write(LOG_BOTH, LOG_INFO, "[OK] SPI bus ready");
+    esp_task_wdt_reset();
 
+    // ---- Instrument Initialization (BNO085 IMU, BMP580 Baro) ----
+    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing sensors...");
+    esp_task_wdt_reset();
+    initInstruments();
+    esp_task_wdt_reset();
+    checkInstruments();
 
     // ---- I2C Bus Initialization ----
     write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing I2C bus...");
@@ -122,14 +131,15 @@ void setup() {
     Wire.setClock(I2C_SPEED);
     delay(100);
     write(LOG_BOTH, LOG_INFO, "[OK] I2C bus ready");
+    esp_task_wdt_reset();
 
     // ---- PWM/Servo Initialization ----
     write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing PWM controller...");
-    // Adafruit_PWMServoDriver::begin() returns void; call it and proceed.
     pwm.begin();
     pwm.setPWMFreq(50);
     UserSpace::initServos();
     write(LOG_BOTH, LOG_INFO, "[OK] PWM controller initialized");
+    esp_task_wdt_reset();
 
     // ---- Flight Control PID Initialization ----
     write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing stabilization PIDs...");
@@ -137,16 +147,10 @@ void setup() {
     airspeedFilter.init();
     write(LOG_BOTH, LOG_INFO, "[OK] PIDs initialized");
 
-    // ---- SPI Bus Initialization ----
-    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing SPI bus...");
-    hspi = new SPIClass(HSPI);
-    hspi->begin(HSPI_CLK, HSPI_MISO, HSPI_MOSI, SD_CS);
-    delay(100);
-    write(LOG_BOTH, LOG_INFO, "[OK] SPI bus ready");
-
     // ---- SD Card Initialization ----
-    write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing SD card...");
+    esp_task_wdt_reset();  // feed before potentially blocking SD.begin()
     SDInit();
+    esp_task_wdt_reset();  // feed after
     if (sdReady) {
         write(LOG_BOTH, LOG_INFO, "[OK] SD card ready for logging");
         write(LOG_BOTH, LOG_INFO, "SD card ready for logging.");
@@ -164,11 +168,12 @@ void setup() {
     } else {
         write(LOG_BOTH, LOG_INFO, "[OK] GPS communication open at %d baud", GPS_BAUD);
     }
+    esp_task_wdt_reset();
 
 
     write(LOG_BOTH, LOG_INFO, "[BOOT] Creating RTOS tasks...");
     
-    // Create Telemetry/GPS Task (handles GPS data collection)
+    // Create Telemetry/GPS Task
     if (xTaskCreatePinnedToCore(
         TelemetryTask,
         "GPS_Telemetry_Task",
@@ -217,13 +222,14 @@ void setup() {
     } else {
         write(LOG_BOTH, LOG_INFO, "[OK] WiFi server task created");
     }
+    esp_task_wdt_reset();
 
     delay(500); // Give tasks time to start
 
     #pragma endregion
 
 
-    // Signal successful boot with chime (move after bus and task init to avoid LEDC warnings)
+    // Signal successful boot with chime
     startupChime();
 
     write(LOG_SERIAL, LOG_INFO, "\n====================================");

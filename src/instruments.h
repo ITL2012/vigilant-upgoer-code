@@ -23,7 +23,34 @@ void enableIMUReports() {
 bool initInstruments() {
     bool success = true;
 
+    // Re-init VSPI bus fresh before sensor init (mimics test_tools probe sequence)
+    SPI.end();
+    delay(10);
     SPI.begin(VSPI_CLK, VSPI_MISO, VSPI_MOSI);
+    delay(10);
+
+    // Manual hardware reset of BNO085 (replicates test_tools sequence)
+    pinMode(BNO_RST, OUTPUT);
+    digitalWrite(BNO_RST, LOW);
+    delay(20);
+    digitalWrite(BNO_RST, HIGH);
+    delay(50);
+
+    // Ensure CS is deselected
+    pinMode(BNO_CS, OUTPUT);
+    digitalWrite(BNO_CS, HIGH);
+    delay(1);
+
+    if (!bno08x.begin_SPI(BNO_CS, BNO_INT, &SPI)) {
+        Serial.println("[ERROR] BNO085 IMU not found on SPI!");
+        Serial.printf("[DEBUG] BNO085 pins: CS=%d, INT=%d, RST=%d\n", BNO_CS, BNO_INT, BNO_RST);
+        Serial.printf("[DEBUG] VSPI pins: MOSI=%d, MISO=%d, CLK=%d\n", VSPI_MOSI, VSPI_MISO, VSPI_CLK);
+    } else {
+        Serial.println("[OK] BNO085 IMU connected.");
+        enableIMUReports();
+        bnoInitialized = true;
+        lastIMUReport_ms.store(millis(), std::memory_order_relaxed);
+    }
 
     if (!bmp.begin((int8_t)BMP_CS, &SPI)) {
         Serial.println("[ERROR] BMP5xx barometer not found on SPI!");
@@ -37,21 +64,20 @@ bool initInstruments() {
         bmpInitialized = true;
     }
 
-    if (!bno08x.begin_SPI(BNO_CS, BNO_INT, &SPI)) {
-        Serial.println("[ERROR] BNO085 IMU not found on SPI!");
-        success = false;
-    } else {
-        Serial.println("[OK] BNO085 IMU connected.");
-        enableIMUReports();
-        bnoInitialized = true;
-        lastIMUReport_ms.store(millis(), std::memory_order_relaxed);
-    }
-
     if (!success) {
         playTone(200, 500);
     }
 
     return success;
+}
+
+void checkInstruments() {
+    Serial.println("\n========== INSTRUMENT CHECK ==========");
+    Serial.printf("  BMP580 Barometer: %s\n", bmpInitialized ? "OK" : "FAIL");
+    Serial.printf("  BNO085 IMU:       %s\n", bnoInitialized ? "OK" : "FAIL");
+    Serial.printf("  GPS:              %s\n", sharedTelemetry.gpsUpdated ? "LOCKED" : "NO LOCK");
+    Serial.printf("  SD Card:          %s\n", sdReady ? "OK" : "NOT MOUNTED");
+    Serial.println("======================================\n");
 }
 
 bool readIMU(float &qx, float &qy, float &qz, float &qw,

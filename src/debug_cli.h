@@ -8,12 +8,12 @@
 #include <Arduino.h>
 #include <TinyGPSPlus.h>
 #include <SPI.h>
+#include <SD_MMC.h>
 #include <Adafruit_BMP5xx.h>
 #include <esp_heap_caps.h>
 
 // Declare external variables from main.cpp
 extern TinyGPSPlus gps;
-extern SPIClass *hspi;
 extern HardwareSerial gpsSerial;
 extern uint32_t sdInitAttempts;
 extern uint32_t sdInitFailures;
@@ -146,11 +146,11 @@ void debugCLI_resetI2C() {
 }
 
 void debugCLI_resetSPI() {
-    Serial.println("[SPI] Resetting bus...");
-    hspi->end();
+    Serial.println("[SPI] VSPI bus reset...");
+    SPI.end();
     delay(100);
-    hspi->begin(HSPI_CLK, HSPI_MISO, HSPI_MOSI, SD_CS);
-    Serial.println("[SPI] Bus reset complete");
+    SPI.begin(VSPI_CLK, VSPI_MISO, VSPI_MOSI);
+    Serial.println("[SPI] VSPI bus reset complete");
 }
 
 void debugCLI_initInstruments() {
@@ -163,8 +163,8 @@ void debugCLI_initInstruments() {
     Wire.setClock(I2C_SPEED);
     delay(100);
     
-    // Reset SPI
-    hspi->end();
+    // Reset VSPI
+    SPI.end();
     delay(50);
     SPI.begin(VSPI_CLK, VSPI_MISO, VSPI_MOSI);
     delay(100);
@@ -186,12 +186,12 @@ void debugCLI_sdInfo() {
         return;
     }
     
-    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+    uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
     Serial.printf("[SD] Card size: %llu MB\n", cardSize);
     
     // List files
     Serial.println("[SD] Files on card:");
-    File root = SD.open("/");
+    File root = SD_MMC.open("/");
     File file = root.openNextFile();
     while (file) {
         if (!file.isDirectory()) {
