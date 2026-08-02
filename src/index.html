@@ -460,7 +460,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <h2 style="margin:0 0 10px 0;font-size:1.1rem;color:var(--accent);">System Maintenance</h2>
         <p style="color:var(--accent-warning);font-size:0.85rem;margin:0 0 8px 0;">Warning: Firmware update reboots the flight controller!</p>
         <div class="btn-row">
-            <button class="btn-dark" onclick="confirmOTA()">Update Firmware</button>
+            <button class="btn-dark" onclick="confirmOTA()">Update Firmware (:81/update)</button>
         </div>
     </div>
 </div>
@@ -889,7 +889,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     function confirmOTA() {
         if (armedState) { alert("Cannot update firmware while ARMED!"); return; }
-        if (confirm("Update firmware? Controller will reboot!")) window.open('/update','_blank');
+        if (confirm("Update firmware? Controller will reboot!")) {
+            window.open('http://' + location.hostname + ':81/update', '_blank');
+        }
     }
 
     function fetchSerialLog() {

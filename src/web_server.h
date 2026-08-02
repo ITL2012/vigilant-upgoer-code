@@ -14,6 +14,7 @@
 #include <ElegantOTA.h>
 
 WebServer* serverPtr = nullptr;
+WebServer* otaServerPtr = nullptr;
 TaskHandle_t wifiServerTaskHandle = NULL;
 SemaphoreHandle_t webServerMutex = NULL;
 
@@ -827,8 +828,35 @@ void registerFullRoutes() {
     serverPtr->on("/baro", HTTP_GET, handleBaroStatus);
     serverPtr->on("/baro/calibrate", HTTP_POST, handleBaroCalibrate);
     serverPtr->on("/baro/invalidate", HTTP_POST, handleBaroInvalidate);
-    ElegantOTA.begin(serverPtr);
     Serial.println("[WIFI] Full dashboard routes registered");
+}
+
+// ElegantOTA runs on its OWN server (port 81) so firmware uploads never
+// compete with the dashboard's /data polling, and so it survives the phase
+// swaps (serverPtr is deleted/recreated on PAD<->READY<->RECOVERY while
+// otaServerPtr never is). Sync-mode WebServer can only serve one client at a
+// time; sharing a server with a 250ms /data poller reliably kills uploads
+// ("status code 0" in the ElegantOTA UI).
+void setupOtaServer() {
+    otaServerPtr = new WebServer(81);
+    ElegantOTA.begin(otaServerPtr);
+    ElegantOTA.setAutoReboot(true);
+    ElegantOTA.onStart([]() {
+        Serial.println("[OTA] Update started");
+    });
+    ElegantOTA.onProgress([](size_t cur, size_t tot) {
+        static unsigned long lastOtaLog = 0;
+        if (millis() - lastOtaLog > 1000) {
+            lastOtaLog = millis();
+            Serial.printf("[OTA] Progress: %u / %u bytes\n",
+                          (unsigned)cur, (unsigned)tot);
+        }
+    });
+    ElegantOTA.onEnd([](bool ok) {
+        Serial.printf("[OTA] Update %s\n", ok ? "OK — rebooting" : "FAILED");
+    });
+    otaServerPtr->begin();
+    Serial.println("[WIFI] ElegantOTA ready at http://<ap-ip>:81/update");
 }
 
 void registerReadyRoutes() {
@@ -859,6 +887,7 @@ void WifiServerTask(void *pvParameters) {
     serverPtr = new WebServer(80);
     registerFullRoutes();
     serverPtr->begin();
+    setupOtaServer();
 
     FlightPhase prevPhase = currentPhase.load(std::memory_order_relaxed);
     uint8_t readyTick = 0;
@@ -869,6 +898,11 @@ void WifiServerTask(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
+
+        // OTA server is phase-independent: serve uploads + reboot timer in
+        // every phase, including READY and BOOST.
+        if (otaServerPtr) otaServerPtr->handleClient();
+        ElegantOTA.loop();
 
         FlightPhase curPhase = currentPhase.load(std::memory_order_relaxed);
 
@@ -920,7 +954,6 @@ void WifiServerTask(void *pvParameters) {
         } else {
             if (serverPtr) {
                 serverPtr->handleClient();
-                ElegantOTA.loop();
             } else {
                 // server pointer temporarily unavailable; yield safely
                 esp_task_wdt_reset();
