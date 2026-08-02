@@ -6,6 +6,19 @@
 #include <Adafruit_PWMServoDriver.h>
 #include <TinyGPSPlus.h>
 
+// ============================================================================
+// BROWNOUT RECOVERY — BUILD-TIME FLAGS (immutable; static constexpr)
+// ============================================================================
+// These four flags are READ-ONLY constants baked in at compile time so nothing
+// (not the dashboard, not CLI, not boot recovery) can accidentally mutate
+// them at runtime. To change them: edit this file and reflash.
+//
+//   enableBrownoutRecovery — on reset mid-flight, apply recent (<60s) snapshot
+//   enableDualWriteCache  — also mirror SD log packets to NVS (flash wear!)
+//   enableBackupChute     — descent-rate backup chute auto-fire
+//   flightCacheValid      — RUNTIME bool (defined in main.cpp); set true after
+//                           a successful in-flight snapshot load at boot
+
 int BMP580good;
 int BNO080good;
 int GPSgood;
@@ -19,22 +32,178 @@ float current_yaw;
 
 static constexpr bool debugMode = false;
 
+// Brownout recovery / pyro backup flags — see top-of-file comment.
+static constexpr bool enableBackupChute      = false;
+static constexpr bool enableBrownoutRecovery = true;   // resume in-flight state on reboot/reset
+static constexpr bool enableDualWriteCache   = false;  // dual-write log packets to NVS (flash wear!)
+
+
+
 static constexpr bool enableBuzzer = true;
 static constexpr bool stabilizationMode = true;
 static constexpr bool enforceGPSLock = false;
 static constexpr bool enforceSDCard = true;
 static constexpr bool enableWaypointGuidance = false;
 
-static constexpr int pyro1Pin = 999;
+static constexpr int pyro1Pin = 999;  // 999 = no channel wired
 static constexpr int pyro2Pin = 999;
 static constexpr int pyro3Pin = 999;
 
 static constexpr int Enable5VPin = 3;
 bool Enabled5V = false;
 
-static constexpr int parachutePyroPin = pyro1Pin; // CHANGE TO REAL PIN
+// ============================================================================
+// PYRO CHANNEL CONFIGURATION
+// ============================================================================
+// Per-pin unified configuration. Each of the 3 hardware pyro channels can be
+// independently assigned a role, pulse duration, enabled/disabled, and an
+// optional trigger parameter used by aux events (e.g. staging delay or main
+// deploy altitude). Roles are code-configured here at build time (NOT web
+// reassignable) — to change which pin does what job, edit the alias lines
+// below. A pin value of 999 means "not connected".
+
+enum PyroRole {
+    ROLE_NONE = 0,          // Channel disabled / unassigned
+    ROLE_PRIMARY_CHUTE = 1, // Fires automatically at apogee
+    ROLE_BACKUP_CHUTE = 2,  // Fires automatically if primary fails (descent-rate heuristic)
+    ROLE_AUX_STAGING = 3,   // Fires automatically after auxTriggerValue_ms post-liftoff (extra staging / air-start)
+    ROLE_AUX_MAIN    = 4,   // Fires automatically when filter_alt <= auxTriggerValue_m (low-alt main chute)
+    ROLE_MANUAL      = 5    // Only operator-fires it (web/CLI); never automatic
+};
+
+struct PyroChannelConfig {
+    int pin;                       // physical GPIO (999 = not connected)
+    unsigned long pulseMs;         // firing pulse duration
+    PyroRole role;                 // assigned role (build-time configurable)
+    bool enabled;                  // disable a channel without re-wiring
+    unsigned long auxTriggerValue; // ms for STAGING, m (×1000 int) for MAIN; 0 = use default
+};
+
+// Default per-channel config. Edit these aliases (and the helpers below) to
+// rebind which physical pin handles which role. Set pin=999 to omit a channel.
+static constexpr int        parachutePyroPin        = pyro1Pin; // backwards-compat alias
+static constexpr int        backupChutePyroPin     = pyro2Pin; // alias for backup chute role
+static constexpr int        auxiliaryPyroPin        = pyro3Pin; // alias for aux role
 static constexpr unsigned long parachutePulseDurationMs = 75;
+static constexpr unsigned long backupPulseDurationMs    = 75;
+static constexpr unsigned long auxPulseDurationMs        = 100;
 static constexpr unsigned long minAltitudeForParachuteMeters = 150;
+
+// runtime-toggleable: turn OFF backup-charge logic — NOTE: enableBackupChute is
+// now static constexpr (read-only). Edit globals.h to change.
+// (no extern here; defined as static constexpr at top of file)
+
+// Backup-charge descent-rate heuristic constants
+static constexpr float    DESCENT_FAIL_VZ_THRESHOLD       = -15.0f; // m/s; if descending faster after eval window -> backup
+static constexpr unsigned long POST_FIRE_EVAL_WINDOW_MS   = 1500;   // observe V_z this long after primary fire
+static constexpr float    EXPECTED_CANOPY_DESCENT_MPS     = 5.0f;   // nominal chute descent (reference only)
+
+// Aux trigger default values (overridable per-channel via auxTriggerValue)
+static constexpr unsigned long DEFAULT_AUX_STAGING_DELAY_MS = 2000;  // post-liftoff delay for ROLE_AUX_STAGING
+static constexpr float        DEFAULT_AUX_MAIN_ALT_M       = 50.0f; // deploy altitude for ROLE_AUX_MAIN (== DEPLOYMENT_ALTITUDE)
+
+// Channel registry (defined in main.cpp). Index 0..2 == pyro1..3.
+extern PyroChannelConfig pyroChannels[3];
+
+// Find first channel index currently assigned to a given role, or -1 if none.
+int pyroChannelForRole(PyroRole r);
+
+// ============================================================================
+// SHARED FLIGHT DIAGNOSTICS (for brownout cache and telemetry)
+// ============================================================================
+extern float max_altitude;
+
+// ============================================================================
+// BROWNOUT RECOVERY — FLIGHT STATE SNAPSHOT
+// ============================================================================
+// Three-tier persistence:
+//   - RTC slow memory (RTC_DATA_ATTR): updated every loop, no wear. Fastest.
+//   - NVS / Preferences (flash): updated on phase transitions + pyro events.
+//   - SD card (/flight_state.bin): same triggers as NVS, large file.
+// At boot, if a snapshot is <BROWNOUT_CACHE_VALIDITY_S seconds old AND shows
+// the controller was armed/in-flight, the snapshot is re-applied and the
+// state machine resumes from the cached phase. This survives a brownout /
+// panic reset mid-flight (NOT a full power-cycle).
+//
+// PID accumulators are stored in the snapshot, but written only on phase
+// transitions to avoid excessive flash wear (they ride RTC per-loop instead).
+
+static constexpr unsigned long BROWNOUT_CACHE_VALIDITY_S = 60;  // seconds
+static constexpr uint32_t       BROWNOUT_CACHE_MAGIC        = 0xB04C1A57;  // "BO-CAST" magic
+static constexpr uint32_t       BROWNOUT_CACHE_VERSION      = 1;
+static constexpr size_t         BROWNOUT_NUM_PID             = 8;
+
+struct FlightCache {
+    uint32_t magic;             // BROWNOUT_CACHE_MAGIC if valid
+    uint32_t version;           // schema version for forward-compat
+    uint64_t snapshotEpoch_ms;  // wall-clock of snapshot (or 0 if no RTC)
+
+    // Mode + phase + armed
+    uint8_t  systemMode;        // SystemMode
+    uint8_t  flightPhase;       // FlightPhase
+    uint8_t  armed;             // 0/1
+
+    // Timings
+    uint64_t liftoffEpoch_ms;   // epoch at liftoff (liftoff_time_ms preserved across reboot)
+    uint32_t liftoffAgeMs;      // fallback: age at snapshot if no epoch
+
+    // Flight state
+    float    filter_alt;
+    float    V_z;
+    float    max_altitude;
+    float    baseline_altitude; // ground ref restored
+    float    qnh_pressure;       // sea-level pressure reference (was missing — bug fix)
+
+    // Pyro
+    uint8_t  pyroStateArr[3];   // PyroState per channel
+    uint32_t pyroFiredAtMs[3];  // ms timestamps of fire
+    uint8_t  pyroAttempted[3];  // 0/1
+    uint8_t  backupEnabled;     // 0/1 copy of enableBackupChute
+
+    // PID integrators (resume stabilization continuity)
+    float    pid_iTerm[BROWNOUT_NUM_PID];
+
+    // Diagnostics
+    uint32_t bootCount;
+    uint32_t lastResetReason;   // esp_reset_reason_t
+};
+
+extern bool        flightCacheValid;     // set true after a successful loadFromAny
+extern FlightCache flightCacheRestored; // copy restored at boot (for logging)
+extern uint32_t    bootCount;
+extern uint32_t    rtcLastResetReason;   // NOINIT RTC var — survives reboot only
+
+// Save current flight state into all three stores (RTC always; NVS+SD optional
+// via writeFlash == true). Called on phase transitions & pyro events.
+void flightCacheSave(bool writeFlash);
+
+// ============================================================================
+// BAROMETER CALIBRATION (always restored on boot from NVS)
+// ============================================================================
+struct BaroCalibration;
+extern BaroCalibration baroCal;
+extern const char *baroCalSource;
+void baroCalibrationSampleAndCompute(BaroCalibration &out);
+void baroCalibrationSave(const BaroCalibration &c);
+bool baroCalibrationLoad(BaroCalibration &out);
+void baroCalibrationInvalidate();
+bool baroCalibrationRestoreOnBoot();
+void calibrateGroundAltitude();
+
+// Per-loop RTC-only snapshot (no flash wear).
+void flightCacheSnapshotRTC();
+
+// Load the most-recent snapshot from NVS (preferred) or SD (fallback). Returns
+// true if a valid in-flight snapshot was loaded and applied.
+bool flightCacheLoadAndApply();
+
+// Invalidate the snapshot (called when transitioning to TRANSPORT/RECOVERY so
+// the next cold boot doesn't resume a long-finished flight).
+void flightCacheInvalidate();
+
+// Restore PID integrators / pyroState from a loaded FlightCache.
+void flightCacheRestorePyros(const FlightCache &c);
+void flightCacheRestorePID(const FlightCache &c);
 
 static constexpr bool enableAutoMotorIgnition = false;
 static constexpr float motorPyroPin = 999;
@@ -221,6 +390,7 @@ extern float qnh_pressure;
 extern unsigned long lastMicros;
 extern unsigned long lastLogTime;
 extern std::atomic<unsigned long> lastIMUReport_ms;
+extern std::atomic<uint8_t> imuCalStatus; // BNO085 dynamic-cal accuracy 0-3 (3 = fully calibrated)
 extern std::atomic<unsigned long> liftoff_time_ms;
 extern std::atomic<uint32_t> logDropCount;
 

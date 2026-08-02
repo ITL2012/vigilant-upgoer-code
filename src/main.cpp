@@ -6,6 +6,7 @@
 #include "Launchsequence.h"
 #include "debug_cli.h"
 #include "buzzers.h"
+#include "brownout_recovery.h"
 
 #include <Arduino.h>
 #include <math.h>
@@ -28,6 +29,7 @@ float filter_alt = 0.0f;
 float baseline_altitude = 0.0f;
 float previous_altitude = 0.0f;
 float qnh_pressure = 1013.25f;
+float max_altitude = 0.0f;
 
 float latestServoAngles[8] = {90.0f};
 float latestPIDOutputs[8]  = {0.0f};
@@ -58,6 +60,7 @@ SemaphoreHandle_t logCacheMutex = NULL;
 unsigned long lastMicros = 0;
 unsigned long lastLogTime = 0;
 std::atomic<unsigned long> lastIMUReport_ms(0);
+std::atomic<uint8_t> imuCalStatus(0);
 std::atomic<uint32_t> logDropCount(0);
 
 HardwareSerial gpsSerial(2);
@@ -70,6 +73,42 @@ QueueHandle_t sdLogQueue = NULL;
 TaskHandle_t telemetryTaskHandle = NULL;
 TaskHandle_t sdWriterTaskHandle = NULL;
 
+// ============================================================================
+// PYRO CHANNEL REGISTRY (config) & STATE
+// ============================================================================
+// Edit assignments below to rebind a physical pin to a role. Set pin=999 to
+// effectively disable a channel. The order is pyro1/2/3 -> index 0/1/2.
+
+PyroChannelConfig pyroChannels[3] = {
+    // [0] pyro1 — primary chute
+    { parachutePyroPin, parachutePulseDurationMs, ROLE_PRIMARY_CHUTE, true, 0 },
+    // [1] pyro2 — backup chute
+    { backupChutePyroPin, backupPulseDurationMs, ROLE_BACKUP_CHUTE, true, 0 },
+    // [2] pyro3 — aux role. Default is MANUAL (operator assigns staging / main via code)
+    { auxiliaryPyroPin, auxPulseDurationMs, ROLE_MANUAL, true, 0 },
+};
+
+PyroChannelState pyroState[3] = {
+    { PYRO_IDLE, 0, false },
+    { PYRO_IDLE, 0, false },
+    { PYRO_IDLE, 0, false },
+};
+
+// ============================================================================
+// BROWNOUT RECOVERY — RUNTIME STATE + DIAGNOSTICS
+// ============================================================================
+// enableBrownoutRecovery / enableDualWriteCache / enableBackupChute are
+// static constexpr in globals.h (read-only). Only flightCacheValid + the
+// diagnostic counters are defined here, since they mutate at boot.
+
+FlightCache flightCacheRestored;
+uint32_t bootCount = 0;
+bool flightCacheValid = false;         // set true after successful cache load
+
+// Barometer calibration (always-on restore from NVS at boot)
+BaroCalibration baroCal;
+const char *baroCalSource = "none";
+
 
 
 // ---- Setup & Loop ----
@@ -80,9 +119,25 @@ void setup() {
 
     initLogCache();
 
-    write(LOG_SERIAL, LOG_INFO, "\n====================================");
-    write(LOG_SERIAL, LOG_INFO, "ISAAC L FLIGHT CONTROLLER - BOOTING");
-    write(LOG_SERIAL, LOG_INFO, "====================================");
+    // ---- BOOT DIAGNOSTICS & BROWNOUT RECOVERY ----
+    // Track ESP reset reason +_INCREMENT boot counter (NOINIT survives reboot only)
+    {
+        // Determine reset reason. esp_reset_reason() survives across MOST reboots
+        // (it's based on a hardware register). RTC_NOINIT's rtcBootCount is used as
+        // a soft survival check — if it retained its value we likely had a soft reset.
+        uint32_t prevRtcBoot = rtcBootCount;
+        (void)prevRtcBoot;
+        rtcBootCount++;
+        rtcLastResetReason = (uint32_t)esp_reset_reason();
+        bootCount = rtcBootCount;
+
+        write(LOG_SERIAL, LOG_INFO, "\n====================================");
+        write(LOG_SERIAL, LOG_INFO, "ISAAC L FLIGHT CONTROLLER - BOOTING");
+        write(LOG_SERIAL, LOG_INFO, "====================================");
+        write(LOG_BOTH, LOG_INFO,
+              "[BOOT] bootCount=%u resetReason=%u (1=PowerOn 4=Brownout 14=Panic 15=SW 16=WDT)",
+              (unsigned)bootCount, (unsigned)rtcLastResetReason);
+    }
     if (debugMode) write(LOG_SERIAL, LOG_INFO, "[DEBUG] Type 'help' for debug commands\n");
 
 
@@ -124,6 +179,12 @@ void setup() {
     initInstruments();
     esp_task_wdt_reset();
     checkInstruments();
+
+    // ---- BAROMETER CALIBRATION RESTORE (always-on, from NVS) ----
+    // Done right after instruments init so filter_alt / QNH have valid values
+    // before any telemetry/fusion runs. If no stored calibration, baseline stays
+    // 0 and QNH stays ISA default; operator can calibrate via web/CLI on the pad.
+    baroCalibrationRestoreOnBoot();
 
     // ---- I2C Bus Initialization ----
     write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing I2C bus...");
@@ -228,12 +289,26 @@ void setup() {
 
     #pragma endregion
 
+    // ---- BROWNOUT RECOVERY — apply cached in-flight state (if recent) ----
+    // Done after all subsystems are up so telemetry / servos / SD logging
+    // resume immediately alongside the restored phase. If this returns true,
+    // we skip the "READY FOR OPERATION" boot-complete posture and continue flying.
+    bool resumedInFlight = flightCacheLoadAndApply();
+    if (resumedInFlight) {
+        write(LOG_BOTH, LOG_WARN,
+              "[BROWNOUT] Flight resumed from cached snapshot. Continuing phase=%u.",
+              (unsigned)currentPhase.load(std::memory_order_relaxed));
+    }
 
     // Signal successful boot with chime
     startupChime();
 
     write(LOG_SERIAL, LOG_INFO, "\n====================================");
-    write(LOG_SERIAL, LOG_INFO, "BOOT COMPLETE - READY FOR OPERATION");
+    if (resumedInFlight) {
+        write(LOG_SERIAL, LOG_INFO, "BOOT COMPLETE - FLIGHT RESUMED");
+    } else {
+        write(LOG_SERIAL, LOG_INFO, "BOOT COMPLETE - READY FOR OPERATION");
+    }
     write(LOG_SERIAL, LOG_INFO, "====================================");
     write(LOG_BOTH, LOG_INFO, "[SYSTEM] Core 1 standby. Mode: TRANSPORT.");
     if (debugMode) {

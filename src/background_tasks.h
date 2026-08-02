@@ -7,10 +7,35 @@
 #include <esp_task_wdt.h>
 #include <SD_MMC.h>
 #include <stdarg.h>
+#include <Preferences.h>
 
 // Forward declarations for externs defined in main.cpp
 extern HardwareSerial gpsSerial;
 extern QueueHandle_t sdLogQueue;
+
+// SD-fallback dual-write mirror. Only used when enableDualWriteCache is true.
+// Writes the most recent log packets to a rotating NVS ring (16 slots).
+// Throttled to ~1Hz to avoid burning flash erase cycles at flight rates.
+namespace {
+    Preferences logMirrorPrefs;
+    bool logMirrorOpen = false;
+    uint32_t mirrorSeq = 0;
+    const char *LOG_MIRROR_NS = "logmirror";
+    constexpr size_t LOG_MIRROR_SLOTS = 16;
+    constexpr uint32_t LOG_MIRROR_THROTTLE_MS = 1000;
+
+    void mirrorPacketToFlash(const LogPacket &p) {
+        if (!logMirrorOpen) {
+            if (!logMirrorPrefs.begin(LOG_MIRROR_NS, false)) return;
+            logMirrorOpen = true;
+        }
+        char key[8];
+        snprintf(key, sizeof(key), "p%02u", (unsigned)(mirrorSeq % LOG_MIRROR_SLOTS));
+        logMirrorPrefs.putBytes(key, &p, sizeof(LogPacket));
+        logMirrorPrefs.putULong("seq", mirrorSeq);
+        mirrorSeq++;
+    }
+}
 extern char serialLogBuffer[];
 extern volatile uint16_t serialLogHead;
 extern volatile uint16_t serialLogTail;
@@ -390,6 +415,17 @@ void SDWriterTask(void *pvParameters) {
             UBaseType_t remaining = uxQueueMessagesWaiting(sdLogQueue);
             if (remaining == 0) {
                 logFile.flush();
+            }
+
+            // Optional flash mirror (SD-fallback). Throttled to ~1 Hz to avoid
+            // burning flash erase cycles at flight log rates.
+            if (enableDualWriteCache) {
+                static uint32_t lastMirrorMs = 0;
+                uint32_t now = millis();
+                if (now - lastMirrorMs >= LOG_MIRROR_THROTTLE_MS) {
+                    mirrorPacketToFlash(packet);
+                    lastMirrorMs = now;
+                }
             }
         }
 

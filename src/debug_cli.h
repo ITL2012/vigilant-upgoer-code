@@ -5,6 +5,8 @@
 
 #include "globals.h"
 #include "instruments.h"
+#include "Launchsequence.h"
+#include "brownout_recovery.h"
 #include <Arduino.h>
 #include <TinyGPSPlus.h>
 #include <SPI.h>
@@ -47,6 +49,22 @@ void debugCLI_printHelp() {
     Serial.println("  servo <ch> <ang>  - Set servo angle (0-7, 60-120\")");
     Serial.println("  mode <transport|pad|active_pad> - Set system mode");
     Serial.println("");
+    Serial.println("  pyro list         - Show all pyro channels (role, pin, state)");
+    Serial.println("  pyro fire <ch>    - Manual fire channel (0-2)");
+    Serial.println("  pyro fireRole <r> - Manual fire whichever channel holds role r (0-5)");
+    Serial.println("  pyro reset        - Clear all channel states to IDLE (ground test)");
+    Serial.println("  pyro backup on|off- (BUILD-TIME only) — flags cannot be changed at runtime");
+    Serial.println("");
+    Serial.println("  brownout status   - Show cache/reset diagnostics");
+    Serial.println("  brownout recovery on|off - (BUILD-TIME only)");
+    Serial.println("  brownout dualwrite on|off- (BUILD-TIME only)");
+    Serial.println("  brownout invalidate- Clear cached in-flight snapshot");
+    Serial.println("");
+    Serial.println("  baro status       - Show stored ground calibration (baseline/QNH/source)");
+    Serial.println("  baro calibrate    - Re-sample & save ground calibration (NVS flash)");
+    Serial.println("  baro invalidate   - Clear stored calibration, back to ISA defaults");
+    Serial.println("  imu cal           - Show BNO085 calibration status (0-3)");
+    Serial.println("");
 }
 
 void debugCLI_printStatus() {
@@ -80,6 +98,23 @@ void debugCLI_printStatus() {
     Serial.printf("Velocity Z: %.2f m/s\n", V_z);
     Serial.printf("Roll: %.2f Pitch: %.2f Yaw: %.2f\n", 
                   current_roll, current_pitch, current_yaw);
+
+    Serial.println("\n=== PYRO CHANNELS ===");
+    Serial.printf("Backup chute: %s\n", enableBackupChute ? "ENABLED" : "DISABLED");
+    for (int i = 0; i < 3; i++) {
+        const char* stateStr = (pyroState[i].state == PYRO_IDLE)   ? "IDLE"  :
+                               (pyroState[i].state == PYRO_FIRING) ? "FIRING":
+                               (pyroState[i].state == PYRO_FIRED)  ? "FIRED" : "FAILED";
+        Serial.printf("  ch%d pin=%d role=%s state=%s\n",
+                      i, pyroChannels[i].pin, pyroRoleName(pyroChannels[i].role), stateStr);
+    }
+    Serial.println("\n=== BROWNOUT ===");
+    Serial.printf("Boot count: %u  Last reset reason: %u\n",
+                  (unsigned)bootCount, (unsigned)rtcLastResetReason);
+    Serial.printf("Recovery enabled: %s  Dual-write: %s  Cache valid: %s\n",
+                  enableBrownoutRecovery ? "Y" : "N",
+                  enableDualWriteCache  ? "Y" : "N",
+                  flightCacheValid      ? "Y" : "N");
     Serial.println("");
 }
 
@@ -250,6 +285,128 @@ void debugCLI_processCommand(String cmd) {
                 Serial.println("[SERVO] Invalid params: servo <0-7> <60-120>");
             }
         }
+    }
+    else if (cmd == "pyro list" || cmd == "pyro") {
+        Serial.println("\n=== PYRO CHANNELS ===");
+        Serial.printf("Backup chute: %s\n", enableBackupChute ? "ENABLED" : "DISABLED");
+        for (int i = 0; i < 3; i++) {
+            const char* stateStr = (pyroState[i].state == PYRO_IDLE)   ? "IDLE"  :
+                                   (pyroState[i].state == PYRO_FIRING) ? "FIRING":
+                                   (pyroState[i].state == PYRO_FIRED)  ? "FIRED" : "FAILED";
+            Serial.printf("  ch%d pin=%d role=%s pulse=%lu ms enabled=%s state=%s fired_ms=%lu\n",
+                          i,
+                          pyroChannels[i].pin,
+                          pyroRoleName(pyroChannels[i].role),
+                          pyroChannels[i].pulseMs,
+                          pyroChannels[i].enabled ? "Y" : "N",
+                          stateStr,
+                          pyroState[i].firedAtMs);
+        }
+        Serial.println("Roles: 0=NONE 1=PRIMARY 2=BACKUP 3=AUX_STAGING 4=AUX_MAIN 5=MANUAL");
+        Serial.println("");
+    }
+    else if (cmd.startsWith("pyro fire ")) {
+        String arg = cmd.substring(10);
+        arg.trim();
+        int ch = arg.toInt();
+        if (ch < 0 || ch > 2) {
+            Serial.println("[PYRO] Invalid channel: pyro fire <0-2>");
+        } else {
+            bool ok = firePyroChannel(ch, /*safetyOverride=*/false);
+            Serial.println(ok ? "[PYRO] Fire command accepted" : "[PYRO] Fire rejected (see log)");
+        }
+    }
+    else if (cmd.startsWith("pyro fireRole ")) {
+        String arg = cmd.substring(14);
+        arg.trim();
+        int r = arg.toInt();
+        if (r < (int)ROLE_NONE || r > (int)ROLE_MANUAL) {
+            Serial.println("[PYRO] Invalid role (0-5). See 'pyro list'.");
+        } else {
+            bool ok = fireByRole(pyroRoleFromInt(r), /*safetyOverride=*/false);
+            Serial.println(ok ? "[PYRO] Fire-by-role accepted" : "[PYRO] Fire-by-role rejected (see log)");
+        }
+    }
+    else if (cmd == "pyro reset") {
+        if (systemArmed.load(std::memory_order_relaxed)) {
+            Serial.println("[PYRO] Disarm before reset.");
+        } else {
+            resetPyroStates();
+        }
+    }
+    else if (cmd.startsWith("pyro backup ")) {
+        // enableBackupChute is static constexpr — cannot be mutated at runtime.
+        Serial.println("[PYRO] enableBackupChute is BUILD-TIME only. Edit globals.h and reflash.");
+    }
+    else if (cmd == "brownout status") {
+        Serial.println("\n=== BROWNOUT RECOVERY ===");
+        Serial.printf("Recovery enabled:    %s  (BUILD-TIME)\n", enableBrownoutRecovery ? "YES" : "NO");
+        Serial.printf("Dual-write log mirror: %s  (BUILD-TIME)\n", enableDualWriteCache ? "YES" : "NO");
+        Serial.printf("Backup chute:        %s  (BUILD-TIME)\n", enableBackupChute ? "ENABLED" : "DISABLED");
+        Serial.printf("Boot count:          %u\n", (unsigned)bootCount);
+        Serial.printf("Last reset reason:   %u (4=Brownout 14=Panic 15=SW_RST 16=WDT)\n",
+                      (unsigned)rtcLastResetReason);
+        Serial.printf("Flight cache valid:  %s\n", flightCacheValid ? "YES (reloaded this boot)" : "NO");
+        if (flightCacheValid) {
+            Serial.printf("  Restored phase: %u  armed: %u  V_z: %.2f  filter_alt: %.2f\n",
+                          (unsigned)flightCacheRestored.flightPhase,
+                          (unsigned)flightCacheRestored.armed,
+                          flightCacheRestored.V_z, flightCacheRestored.filter_alt);
+        }
+        Serial.println("");
+    }
+    else if (cmd.startsWith("brownout recovery ")) {
+        Serial.println("[BROWNOUT] enableBrownoutRecovery is BUILD-TIME only. Edit globals.h and reflash.");
+    }
+    else if (cmd.startsWith("brownout dualwrite ")) {
+        Serial.println("[BROWNOUT] enableDualWriteCache is BUILD-TIME only. Edit globals.h and reflash.");
+    }
+    else if (cmd == "brownout invalidate") {
+        flightCacheInvalidate();
+        Serial.println("[BROWNOUT] In-flight cache invalidated");
+    }
+    else if (cmd == "baro status") {
+        extern std::atomic<unsigned long long> systemBaseEpochMs;
+        unsigned long long ageMs = (baroCal.calibratedAtEpoch_ms > 0 && systemBaseEpochMs > 0)
+            ? (systemBaseEpochMs - baroCal.calibratedAtEpoch_ms) : 0;
+        Serial.println("\n=== BAROMETER CALIBRATION ===");
+        Serial.printf("Source:            %s\n", baroCalSource);
+        Serial.printf("Baseline altitude: %.2f m\n", baseline_altitude);
+        Serial.printf("QNH reference:     %.2f hPa\n", qnh_pressure);
+        Serial.printf("Cal age:           %s\n", baroCal.calibratedAtEpoch_ms ? "(see age_ms below)" : "never");
+        Serial.printf("  age_ms=%llu\n", ageMs);
+        Serial.println("");
+    }
+    else if (cmd == "baro calibrate") {
+        FlightPhase phaseNow = currentPhase.load(std::memory_order_relaxed);
+        if (phaseNow == BOOST || phaseNow == COAST || phaseNow == DESCENT || phaseNow == RECOVERY) {
+            Serial.println("[BARO] BLOCKED: Cannot calibrate during flight!");
+        } else if (!bmpInitialized) {
+            Serial.println("[BARO] Barometer not initialized! Check wiring.");
+        } else {
+            Serial.println("[BARO] Sampling 50x over ~2s — keep rocket still...");
+            calibrateGroundAltitude();
+            Serial.printf("[BARO] Calibration saved to NVS flash — baseline=%.2fm qnh=%.2f hPa\n",
+                          baseline_altitude, qnh_pressure);
+        }
+    }
+    else if (cmd == "baro invalidate") {
+        baroCalibrationInvalidate();
+        memset(&baroCal, 0, sizeof(baroCal));
+        baroCalSource = "none";
+        qnh_pressure = 1013.25f;
+        Serial.println("[BARO] Stored calibration cleared — using ISA defaults");
+    }
+    else if (cmd == "imu cal") {
+        uint8_t cal = imuCalStatus.load(std::memory_order_relaxed);
+        const char* names[] = {"UNRELIABLE (0/3)", "LOW (1/3)", "MEDIUM (2/3)", "FULLY CALIBRATED (3/3)"};
+        Serial.println("\n=== IMU CALIBRATION (BNO085 dynamic cal) ===");
+        Serial.printf("Status: %s\n", names[cal > 3 ? 0 : cal]);
+        if (cal < 3) {
+            Serial.println("Tip: keep rocket level & still for 30-60s; gyro/accel calibrate automatically.");
+            Serial.println("     Yaw drift is normal — no magnetometer is used.");
+        }
+        Serial.println("");
     }
     else if (cmd.startsWith("mode ")) {
         // Prevent mode changes during flight

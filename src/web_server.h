@@ -198,7 +198,7 @@ void handleGetData() {
     sensors_ready = sharedTelemetry.sensors_ok;
     xSemaphoreGive(telemetryMutex);
 
-    char json[1400];
+    char json[1920];
     int len = snprintf(json, sizeof(json),
       "{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f,"
        "\"raw_alt\":%.2f,\"filtered_alt\":%.2f,\"vel_z\":%.2f,"
@@ -209,13 +209,20 @@ void handleGetData() {
        "\"pid4\":%.3f,\"pid5\":%.3f,\"pid6\":%.3f,\"pid7\":%.3f,"
        "\"gain_kp\":%.4f,\"gain_ki\":%.4f,\"gain_kd\":%.4f,"
        "\"baro_pressure\":%.2f,\"baro_temp\":%.2f,"
+       "\"baro_cal\":{\"baseline\":%.3f,\"qnh\":%.3f,\"source\":\"%s\",\"age_ms\":%llu},"
        "\"qx\":%.4f,\"qy\":%.4f,\"qz\":%.4f,\"qw\":%.4f,"
        "\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
+       "\"imu_cal\":%u,"
        "\"dt\":%.6f,\"log_drops\":%u,"
        "\"imu_ok\":%s,\"baro_ok\":%s,\"gps_ok\":%s,\"sd_ready\":%s,"
        "\"servo0\":%.1f,\"servo1\":%.1f,\"servo2\":%.1f,\"servo3\":%.1f,"
-       "\"servo4\":%.1f,\"servo5\":%.1f,\"servo6\":%.1f,\"servo7\":%.1f,"
-       "\"servo_override\":%s}",
+        "\"servo4\":%.1f,\"servo5\":%.1f,\"servo6\":%.1f,\"servo7\":%.1f,"
+        "\"servo_override\":%s,"
+        "\"pyro\":[{\"ch\":0,\"role\":%d,\"state\":%d,\"fired_ms\":%lu,\"enabled\":%s},"
+        "{\"ch\":1,\"role\":%d,\"state\":%d,\"fired_ms\":%lu,\"enabled\":%s},"
+        "{\"ch\":2,\"role\":%d,\"state\":%d,\"fired_ms\":%lu,\"enabled\":%s}],"
+        "\"backup_enabled\":%s,"
+        "\"brownout\":{\"boot_count\":%u,\"reset_reason\":%u,\"cache_valid\":%s,\"recovery_enabled\":%s,\"dual_write_enabled\":%s}",
       r, p, y,
       ra, fa, vz,
       lat, lng,
@@ -228,8 +235,11 @@ void handleGetData() {
       latestPIDOutputs[4], latestPIDOutputs[5], latestPIDOutputs[6], latestPIDOutputs[7],
       latestActiveGains[0], latestActiveGains[1], latestActiveGains[2],
       latestBaroPressure, latestBaroTemp,
+      baroCal.baseline_altitude, baroCal.qnh_pressure, baroCalSource,
+      (unsigned long long)baroCal.calibratedAtEpoch_ms,
       latestQx, latestQy, latestQz, latestQw,
       latestAx, latestAy, latestAz,
+    imuCalStatus.load(std::memory_order_relaxed),
     latestDt, (uint32_t)logDropCount,
     bnoInitialized ? "true" : "false",
     bmpInitialized ? "true" : "false",
@@ -237,7 +247,18 @@ void handleGetData() {
     sdReady ? "true" : "false",
     latestServoAngles[0], latestServoAngles[1], latestServoAngles[2], latestServoAngles[3],
       latestServoAngles[4], latestServoAngles[5], latestServoAngles[6], latestServoAngles[7],
-      servoOverrideActive ? "true" : "false"
+      servoOverrideActive ? "true" : "false",
+      (int)pyroChannels[0].role, (int)pyroState[0].state, pyroState[0].firedAtMs,
+      pyroChannels[0].enabled ? "true" : "false",
+      (int)pyroChannels[1].role, (int)pyroState[1].state, pyroState[1].firedAtMs,
+      pyroChannels[1].enabled ? "true" : "false",
+      (int)pyroChannels[2].role, (int)pyroState[2].state, pyroState[2].firedAtMs,
+      pyroChannels[2].enabled ? "true" : "false",
+      enableBackupChute ? "true" : "false",
+      (unsigned)bootCount, (unsigned)rtcLastResetReason,
+      flightCacheValid ? "true":"false",
+      enableBrownoutRecovery ? "true":"false",
+      enableDualWriteCache ? "true":"false"
     );
 
     if (len < 0 || len >= (int)sizeof(json)) {
@@ -596,6 +617,185 @@ void handleLaunch() {
 }
 
 
+
+// ============================================================================
+// PYRO CHANNEL ENDPOINTS
+// ============================================================================
+// All pyro config / manual fire endpoints are ground-only (PAD / READY).
+// Rebinding a channel's role is permitted only while the system is DISARMED —
+// roles freeze on arm (see fireByRole / arm()). Manual fire works while armed,
+// but most deployment is automatic during flight (the dashboard is not expected
+// to be live mid-flight anyway).
+
+void handlePyroStatus() {
+    char json[640];
+    int len = snprintf(json, sizeof(json),
+        "{\"backup_enabled\":%s,\"channels\":["
+        "{\"ch\":0,\"pin\":%d,\"role\":%d,\"role_name\":\"%s\",\"pulse_ms\":%lu,\"enabled\":%s,\"state\":%d,\"fired_ms\":%lu,\"attempted\":%s},"
+        "{\"ch\":1,\"pin\":%d,\"role\":%d,\"role_name\":\"%s\",\"pulse_ms\":%lu,\"enabled\":%s,\"state\":%d,\"fired_ms\":%lu,\"attempted\":%s},"
+        "{\"ch\":2,\"pin\":%d,\"role\":%d,\"role_name\":\"%s\",\"pulse_ms\":%lu,\"enabled\":%s,\"state\":%d,\"fired_ms\":%lu,\"attempted\":%s}"
+        "]}",
+        enableBackupChute ? "true" : "false",
+        pyroChannels[0].pin, (int)pyroChannels[0].role, pyroRoleName(pyroChannels[0].role),
+        pyroChannels[0].pulseMs, pyroChannels[0].enabled ? "true":"false",
+        (int)pyroState[0].state, pyroState[0].firedAtMs, pyroState[0].attempted?"true":"false",
+        pyroChannels[1].pin, (int)pyroChannels[1].role, pyroRoleName(pyroChannels[1].role),
+        pyroChannels[1].pulseMs, pyroChannels[1].enabled ? "true":"false",
+        (int)pyroState[1].state, pyroState[1].firedAtMs, pyroState[1].attempted?"true":"false",
+        pyroChannels[2].pin, (int)pyroChannels[2].role, pyroRoleName(pyroChannels[2].role),
+        pyroChannels[2].pulseMs, pyroChannels[2].enabled ? "true":"false",
+        (int)pyroState[2].state, pyroState[2].firedAtMs, pyroState[2].attempted?"true":"false"
+    );
+    if (len < 0 || len >= (int)sizeof(json)) {
+        serverPtr->send(500, "application/json", "{\"status\":\"error\"}");
+        return;
+    }
+    serverPtr->send(200, "application/json", json);
+}
+
+void handlePyroAssign() {
+    // POST /pyro/assign?ch=<0-2>&role=<0-5>  (disarmed only)
+    if (!serverPtr->hasArg("ch") || !serverPtr->hasArg("role")) {
+        serverPtr->send(400, "text/plain", "MISSING ch OR role PARAM");
+        return;
+    }
+    int ch  = serverPtr->arg("ch").toInt();
+    int rol = serverPtr->arg("role").toInt();
+    if (ch < 0 || ch > 2) {
+        serverPtr->send(400, "text/plain", "INVALID ch (0..2)");
+        return;
+    }
+    if (rol < (int)ROLE_NONE || rol > (int)ROLE_MANUAL) {
+        serverPtr->send(400, "text/plain", "INVALID role (0..5)");
+        return;
+    }
+    if (systemArmed.load(std::memory_order_relaxed)) {
+        serverPtr->send(403, "text/plain", "ROLE REASSIGNMENT LOCKED — DISARM FIRST");
+        return;
+    }
+    FlightPhase p = currentPhase.load(std::memory_order_relaxed);
+    if (p != PAD && p != READY && p != TRANSPORT) {
+        serverPtr->send(403, "text/plain", "REASSIGN ONLY ON GROUND (PAD/READY/TRANSPORT)");
+        return;
+    }
+    pyroChannels[ch].role = pyroRoleFromInt(rol);
+    write(LOG_BOTH, LOG_INFO, "[PYRO] Channel %d role assigned to %s via web", ch, pyroRoleName(pyroChannels[ch].role));
+    serverPtr->send(200, "text/plain", "ASSIGNED");
+}
+
+void handlePyroFire() {
+    // POST /pyro/fire?ch=<0-2>   OR   POST /pyro/fire?role=<0-5>
+    bool byRole = serverPtr->hasArg("role") && !serverPtr->hasArg("ch");
+    PyroRole r = ROLE_NONE;
+    int ch = -1;
+    if (byRole) {
+        r = pyroRoleFromInt(serverPtr->arg("role").toInt());
+        ch = pyroChannelForRole(r);
+        if (ch < 0) {
+            serverPtr->send(404, "text/plain", "NO CHANNEL ASSIGNED TO THAT ROLE");
+            return;
+        }
+    } else {
+        if (!serverPtr->hasArg("ch")) { serverPtr->send(400, "text/plain","MISSING ch OR role"); return; }
+        ch = serverPtr->arg("ch").toInt();
+        if (ch < 0 || ch > 2) { serverPtr->send(400, "text/plain","INVALID ch"); return; }
+        r = pyroChannels[ch].role;
+    }
+    // Operator manual fire. Use safetyOverride=false so armed/alt/phase checks
+    // apply normally. Manual role channels bypass COAST-only restriction by
+    // virtue of fireByRole() only enforcing it for PRIMARY_CHUTE.
+    bool ok = (byRole) ? fireByRole(r, /*safetyOverride=*/false)
+                       : firePyroChannel(ch, /*safetyOverride=*/false);
+    serverPtr->send(ok ? 200 : 403, "text/plain", ok ? "FIRED" : "FIRE REJECTED");
+}
+
+void handlePyroReset() {
+    // POST /pyro/reset — clears state for ground test (disarmed only)
+    if (systemArmed.load(std::memory_order_relaxed)) {
+        serverPtr->send(403, "text/plain", "DISARM BEFORE RESET");
+        return;
+    }
+    FlightPhase p = currentPhase.load(std::memory_order_relaxed);
+    if (p != PAD && p != READY && p != TRANSPORT) {
+        serverPtr->send(403, "text/plain", "RESET ONLY ON GROUND");
+        return;
+    }
+    resetPyroStates();
+    serverPtr->send(200, "text/plain", "PYRO STATES CLEARED");
+}
+
+void handlePyroBackupToggle() {
+    // enableBackupChute is now static constexpr (build-time only).
+    // POST /pyro/backup is rejected — change requires edit + reflash.
+    serverPtr->send(403, "text/plain",
+                     "enableBackupChute is a BUILD-TIME constant. Edit globals.h and reflash.");
+}
+
+// ============================================================================
+// BROWNOUT RECOVERY ENDPOINTS
+// ============================================================================
+
+void handleBrownoutRecoveryToggle() {
+    // enableBrownoutRecovery is now static constexpr. Endpoint is read-only.
+    serverPtr->send(403, "text/plain",
+                     "enableBrownoutRecovery is a BUILD-TIME constant. Edit globals.h and reflash.");
+}
+
+void handleBrownoutDualWriteToggle() {
+    // enableDualWriteCache is now static constexpr. Endpoint is read-only.
+    serverPtr->send(403, "text/plain",
+                     "enableDualWriteCache is a BUILD-TIME constant. Edit globals.h and reflash.");
+}
+
+void handleBrownoutInvalidate() {
+    // POST /brownout/invalidate — clear cached snapshot + log mirror
+    flightCacheInvalidate();
+    serverPtr->send(200, "text/plain", "BROWNOUT CACHE INVALIDATED");
+}
+
+// ============================================================================
+// BAROMETER CALIBRATION ENDPOINT
+// ============================================================================
+void handleBaroStatus() {
+    char json[320];
+    snprintf(json, sizeof(json),
+        "{\"baseline\":%.3f,\"qnh\":%.3f,\"temp_c\":%.2f,\"source\":\"%s\",\"age_ms\":%llu}",
+        baroCal.baseline_altitude, baroCal.qnh_pressure, baroCal.ground_temperature_c,
+        baroCalSource, (unsigned long long)baroCal.calibratedAtEpoch_ms);
+    serverPtr->send(200, "application/json", json);
+}
+
+void handleBaroCalibrate() {
+    // POST /baro/calibrate — ground-only (PAD/READY, disarmed, not mid-flight)
+    FlightPhase phase = currentPhase.load(std::memory_order_relaxed);
+    if (phase == BOOST || phase == COAST || phase == DESCENT) {
+        serverPtr->send(403, "text/plain", "BLOCKED: in-flight phase (calibration is ground-only)");
+        return;
+    }
+    if (!bmpInitialized) {
+        serverPtr->send(503, "text/plain", "BMP5xx not initialized");
+        return;
+    }
+    write(LOG_BOTH, LOG_INFO, "[BAROCAL] Calibration triggered via web");
+    calibrateGroundAltitude();
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "CALIBRATED — baseline=%.2fm qnh=%.2f hPa temp=%.1fC",
+             baseline_altitude, qnh_pressure, baroCal.ground_temperature_c);
+    serverPtr->send(200, "text/plain", msg);
+}
+
+void handleBaroInvalidate() {
+    // POST /baro/invalidate — discard stored calibration
+    baroCalibrationInvalidate();
+    memset(&baroCal, 0, sizeof(baroCal));
+    baroCalSource = "none";
+    baseline_altitude = 0.0f;
+    qnh_pressure = 1013.25f;  // ISA default
+    previous_altitude = 0.0f;
+    serverPtr->send(200, "text/plain", "STORED BARO CALIBRATION CLEARED");
+}
+
 void registerFullRoutes() {
     serverPtr->on("/", HTTP_GET, handleRoot);
     serverPtr->on("/data", HTTP_GET, handleGetData);
@@ -613,6 +813,20 @@ void registerFullRoutes() {
     serverPtr->on("/download_log", HTTP_GET, handleDownloadLog);
     serverPtr->on("/delete_log", HTTP_POST, handleDeleteLog);
     serverPtr->on("/confirm_recovery", HTTP_POST, handleConfirmRecovery);
+    // Pyro system endpoints (ground config / manual fire)
+    serverPtr->on("/pyro", HTTP_GET, handlePyroStatus);
+    serverPtr->on("/pyro/assign", HTTP_POST, handlePyroAssign);
+    serverPtr->on("/pyro/fire", HTTP_POST, handlePyroFire);
+    serverPtr->on("/pyro/reset", HTTP_POST, handlePyroReset);
+    serverPtr->on("/pyro/backup", HTTP_POST, handlePyroBackupToggle);
+    // Brownout recovery endpoints
+    serverPtr->on("/brownout/recovery", HTTP_POST, handleBrownoutRecoveryToggle);
+    serverPtr->on("/brownout/dualwrite", HTTP_POST, handleBrownoutDualWriteToggle);
+    serverPtr->on("/brownout/invalidate", HTTP_POST, handleBrownoutInvalidate);
+    // Barometer calibration endpoints
+    serverPtr->on("/baro", HTTP_GET, handleBaroStatus);
+    serverPtr->on("/baro/calibrate", HTTP_POST, handleBaroCalibrate);
+    serverPtr->on("/baro/invalidate", HTTP_POST, handleBaroInvalidate);
     ElegantOTA.begin(serverPtr);
     Serial.println("[WIFI] Full dashboard routes registered");
 }

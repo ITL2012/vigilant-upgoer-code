@@ -293,11 +293,12 @@ bool tracking_landing = false;  // Tracks if the timer is actively running
 
 void process_flight_state_machine(float raw_accel_z, float filter_alt) {
     static uint16_t apogee_counter = 0;
-    static float max_altitude = 0.0f;
+    static float max_altitude_local = 0.0f;
     static uint32_t last_pad_log_ms = 0;
 
-    if (filter_alt > max_altitude) {
-        max_altitude = filter_alt;
+    if (filter_alt > max_altitude_local) {
+        max_altitude_local = filter_alt;
+        ::max_altitude = max_altitude_local;
     }
 
     FlightPhase current = currentPhase.load(std::memory_order_relaxed);
@@ -331,6 +332,7 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
                 ::filter_alt = 0.0f;
                 liftoff_time_ms.store(millis(), std::memory_order_relaxed);
                 write(LOG_BOTH, LOG_INFO, "[PHASE] READY -> BOOST (Liftoff Accel Trigger)");
+                flightCacheSave(true);  // mark in-flight & persist to NVS/SD
             }
         break;
         case BOOST:
@@ -339,11 +341,37 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
                 if (now - liftoff_time_ms.load(std::memory_order_relaxed) >= COAST_LOCKOUT_MS) {
                     currentPhase.store(COAST, std::memory_order_relaxed);
                     write(LOG_BOTH, LOG_INFO, "[PHASE] BOOST -> COAST (Burnout Verified)");
+                    flightCacheSave(true);
                 }
             }
             break;
 
         case COAST: {
+            // ----------------------------------------------------------------
+            // Aux staging: fire on timer post-liftoff (e.g. air-start / 2nd stage)
+            // ----------------------------------------------------------------
+
+// not needed for this design
+
+            /*** 
+            {
+                int sidx = pyroChannelForRole(ROLE_AUX_STAGING);
+                if (sidx >= 0 && pyroState[sidx].state == PYRO_IDLE &&
+                    !pyroState[sidx].attempted) {
+                    unsigned long delayMs = (pyroChannels[sidx].auxTriggerValue > 0)
+                                                ? pyroChannels[sidx].auxTriggerValue
+                                                : (unsigned long)DEFAULT_AUX_STAGING_DELAY_MS;
+                    if (millis() - liftoff_time_ms.load(std::memory_order_relaxed) >= delayMs) {
+                        write(LOG_BOTH, LOG_INFO,
+                              "[AUX STAGING] Delay %lu ms elapsed post-liftoff. Firing staging on ch %d.",
+                              delayMs, sidx);
+                        fireByRole(ROLE_AUX_STAGING);
+                    }
+                }
+            }
+                
+            ****/
+
             // Step 1: Backup timer — forces apogee counter to buffer size
             if (millis() - liftoff_time_ms.load(std::memory_order_relaxed) >= APOGEE_BACKUP_TIMEOUT_MS) {
                 if (apogee_counter < APOGEE_BUFFER_SIZE) {
@@ -363,14 +391,77 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
 
             // Step 3: Confirm apogee and deploy
             if (apogee_counter >= APOGEE_BUFFER_SIZE) {
-                fire_apogee_pyro();
+                fireByRole(ROLE_PRIMARY_CHUTE);
                 currentPhase.store(DESCENT, std::memory_order_relaxed);
                 write(LOG_BOTH, LOG_INFO, "[PHASE] COAST -> DESCENT (Apogee Confirmed)");
+                flightCacheSave(true);  // apogee reached — important to persist
             }
             break;
         }
 
         case DESCENT: {
+            // ----------------------------------------------------------------
+            // Backup chute: descent-rate heuristic
+            // ----------------------------------------------------------------
+            // After the primary chute fires, wait POST_FIRE_EVAL_WINDOW_MS and
+            // check whether we're actually under canopy. If V_z is still more
+            // negative than the fail threshold (falling too fast), fire the
+            // backup chute channel. Only attempts once per flight.
+            {
+                static uint32_t primaryFire_ms = 0;
+                static bool backupEvalDone = false;
+
+                // Capture primary-fire timestamp from whichever channel holds
+                // ROLE_PRIMARY_CHUTE (set when it transitioned to FIRED).
+                if (primaryFire_ms == 0) {
+                    int pidx = pyroChannelForRole(ROLE_PRIMARY_CHUTE);
+                    if (pidx >= 0 && pyroState[pidx].state == PYRO_FIRED) {
+                        primaryFire_ms = pyroState[pidx].firedAtMs;
+                    }
+                }
+
+                if (enableBackupChute && !backupEvalDone && primaryFire_ms &&
+                    millis() - primaryFire_ms >= POST_FIRE_EVAL_WINDOW_MS) {
+                    bool canopyOk = (V_z > DESCENT_FAIL_VZ_THRESHOLD);
+                    int bidx = pyroChannelForRole(ROLE_BACKUP_CHUTE);
+                    if (!canopyOk && bidx >= 0) {
+                        write(LOG_BOTH, LOG_ERROR,
+                              "[BACKUP PYRO] Primary descent too fast (V_z=%.2f m/s). Firing backup chute.",
+                              V_z);
+                        fireByRole(ROLE_BACKUP_CHUTE, /*safetyOverride=*/true);
+                    } else if (!canopyOk && bidx < 0) {
+                        write(LOG_BOTH, LOG_ERROR,
+                              "[BACKUP PYRO] Descent too fast (V_z=%.2f) but NO backup channel assigned!",
+                              V_z);
+                    } else {
+                        write(LOG_BOTH, LOG_INFO,
+                              "[BACKUP PYRO] Canopy detected (V_z=%.2f m/s). Backup not required.", V_z);
+                    }
+                    backupEvalDone = true;
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // Aux events that trigger during descent
+            // ----------------------------------------------------------------
+            // ROLE_AUX_MAIN: fire when filtered altitude drops to its configured
+            // deployment altitude (defaults to DEFAULT_AUX_MAIN_ALT_M = 50 ft).
+            {
+                int aidx = pyroChannelForRole(ROLE_AUX_MAIN);
+                if (aidx >= 0 && pyroState[aidx].state == PYRO_IDLE &&
+                    !pyroState[aidx].attempted) {
+                    float altM = (pyroChannels[aidx].auxTriggerValue > 0)
+                                     ? (pyroChannels[aidx].auxTriggerValue / 1.0f)
+                                     : DEFAULT_AUX_MAIN_ALT_M;
+                    if (filter_alt <= altM) {
+                        write(LOG_BOTH, LOG_INFO,
+                              "[AUX MAIN] Altitude %.1f m <= %.1f m. Firing aux main chute on ch %d.",
+                              filter_alt, altM, aidx);
+                        fireByRole(ROLE_AUX_MAIN);
+                    }
+                }
+            }
+
             if (filter_alt < 5.0f && !tracking_landing) {
                 landing_start_ms = millis();
                 tracking_landing = true;
@@ -385,6 +476,7 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
                     recoveryBeaconStart();
                     write(LOG_BOTH, LOG_INFO, "[PHASE] DESCENT -> RECOVERY (Landing Confirmed)");
                     tracking_landing = false;
+                    flightCacheInvalidate();  // flight done — clear stale in-flight snapshot
                 }
             } else {
                 tracking_landing = false;
@@ -403,6 +495,10 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
             }
             break;
     }
+
+    // Per-loop RTC-only snapshot. Zero flash wear — just RAM. Keeps the
+    // snapshot current between explicit flash saves (phase transitions).
+    flightCacheSnapshotRTC();
 }
 
 // ============================================================================

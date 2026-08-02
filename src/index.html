@@ -271,6 +271,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <div class="card-value" style="font-size:0.9rem;"><span id="ax">0</span> <span id="ay">0</span> <span id="az">0</span></div>
             </div>
             <div class="card">
+                <div class="card-title">IMU Calibration</div>
+                <div class="card-value" style="font-size:1rem;" id="imu-cal">0/3</div>
+            </div>
+            <div class="card">
                 <div class="card-title">Baro Pressure</div>
                 <div class="card-value"><span id="baro-pres">0</span><span class="unit">hPa</span></div>
             </div>
@@ -366,6 +370,70 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
+    <!-- PYRO CHANNELS -->
+    <div class="panel">
+        <h2 style="margin:0 0 10px 0;font-size:1.1rem;color:var(--accent);">Pyro Channels</h2>
+        <p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 10px 0;">
+            Role assignment is ground-only (locked while armed). Manual fire works while armed.
+            Automatic firing during flight does NOT rely on this dashboard.
+        </p>
+        <div class="btn-row" style="margin-bottom:8px;align-items:center;flex-wrap:wrap;gap:14px;">
+            <label style="font-size:0.85rem;color:var(--text-dim);display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="pyro-backup-toggle" disabled>
+                Backup chute (BUILD-TIME only)
+            </label>
+            <button class="btn-dark" onclick="resetPyro()">Reset States (ground test)</button>
+        </div>
+        <div id="pyro-grid" style="display:grid;grid-template-columns:repeat(3, 1fr);gap:10px;"></div>
+    </div>
+
+    <!-- BAROMETER CALIBRATION -->
+    <div class="panel">
+        <h2 style="margin:0 0 10px 0;font-size:1.1rem;color:var(--accent);">Barometer Calibration</h2>
+        <p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 10px 0;">
+            Saves ground baseline + QNH to internal flash (NVS) and auto-restores on every boot.
+            Re-calibrate before each launch — weather drift makes old values stale after ~24h.
+        </p>
+        <div class="btn-row" style="margin-bottom:8px;flex-wrap:wrap;gap:10px;">
+            <button class="btn-accent" onclick="calibrateBaro()">Calibrate Now (ground)</button>
+            <button class="btn-danger" onclick="invalidateBaroCal()">Clear Stored Calibration</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+            <div class="card"><div class="card-title">Baseline Alt (AGL)</div><div class="card-value" id="baro-baseline">0.0<span class="unit">m</span></div></div>
+            <div class="card"><div class="card-title">QNH</div><div class="card-value" id="baro-qnh">1013.25<span class="unit">hPa</span></div></div>
+            <div class="card"><div class="card-title">Source</div><div class="card-value" id="baro-source">none</div></div>
+            <div class="card"><div class="card-title">Cal Age</div><div class="card-value" id="baro-age">—</div></div>
+        </div>
+    </div>
+
+    <!-- BROWNOUT RECOVERY -->
+    <div class="panel">
+        <h2 style="margin:0 0 10px 0;font-size:1.1rem;color:var(--accent);">Brownout Recovery</h2>
+        <p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 10px 0;">
+            On reset mid-flight, a recent snapshot is auto-applied to resume the flight.
+            Snapshot is cleared at RECOVERY/landing or via the button below.
+            Toggles are <b>build-time constants</b> (edit globals.h & reflash to change).
+        </p>
+        <div class="btn-row" style="margin-bottom:8px;flex-wrap:wrap;gap:14px;align-items:center;">
+            <label style="font-size:0.85rem;color:var(--text-dim);display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="bk-recovery-toggle" disabled>
+                In-flight recovery enabled
+            </label>
+            <label style="font-size:0.85rem;color:var(--text-dim);display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="bk-dualwrite-toggle" disabled>
+                SD + flash log dual-write
+                <span style="color:var(--accent-warning);">(flash wear!)</span>
+            </label>
+            <button class="btn-danger" onclick="invalidateBrownoutCache()">Invalidate snapshot</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+            <div class="card"><div class="card-title">Boot Count</div><div class="card-value" id="bk-boot">—</div></div>
+            <div class="card"><div class="card-title">Last Reset</div><div class="card-value" style="font-size:0.85rem;" id="bk-reset">—</div></div>
+            <div class="card"><div class="card-title">Cache</div><div class="card-value" id="bk-cache-valid">—</div></div>
+            <div class="card"><div class="card-title">Resume Status</div><div class="card-value" style="font-size:0.85rem;" id="bk-resume-status">—</div></div>
+        </div>
+    </div>
+
     <!-- SERIAL LOG -->
     <div class="panel">
         <div class="section-title" onclick="toggleSection(this)" style="margin:0 0 10px 0;">Serial Log</div>
@@ -439,6 +507,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 document.getElementById('ay').innerText = d.ay.toFixed(2);
                 document.getElementById('az').innerText = d.az.toFixed(2);
 
+                const calEl = document.getElementById('imu-cal');
+                if (d.imu_cal != null) {
+                    const IC = ['var(--accent-danger)','var(--accent-warning)','var(--accent-warning)','var(--accent-success)'][d.imu_cal];
+                    calEl.innerText = d.imu_cal + '/3';
+                    calEl.style.color = IC;
+                    calEl.title = ['Unreliable','Low','Medium','Fully calibrated'][d.imu_cal];
+                }
+
                 document.getElementById('gain-kp').innerText = d.gain_kp.toFixed(4);
                 document.getElementById('gain-ki').innerText = d.gain_ki.toFixed(4);
                 document.getElementById('gain-kd').innerText = d.gain_kd.toFixed(4);
@@ -480,6 +556,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 }
 
                 armedState = d.armed;
+                window.__lastArmed = !!d.armed;
+                // Refresh pyro panel from /data (authoritative source — same loop as /data)
+                updatePyroPanel(d);
+                updateBrownoutPanel(d);
+                updateBaroPanel(d);
                 const armPill = document.getElementById('arm-pill');
                 if (d.armed) {
                     armPill.innerText = "ARMED";
@@ -581,6 +662,213 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     }
 
     function releaseServos() { fetch('/servo_release', {method:'POST'}); }
+
+    // ---- PYRO CHANNELS ----
+    const PYRO_ROLES = ["NONE","PRIMARY_CHUTE","BACKUP_CHUTE","AUX_STAGING","AUX_MAIN","MANUAL"];
+    const PYRO_STATE_NAMES  = ["IDLE","FIRING","FIRED","FAILED"];
+    const PYRO_STATE_COLORS = ["var(--text-dim)","var(--accent-warning)","var(--accent-success)","var(--accent-danger)"];
+
+    function buildPyroGrid() {
+        const grid = document.getElementById('pyro-grid');
+        grid.innerHTML = '';
+        for (let i = 0; i < 3; i++) {
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.style.flexDirection = 'column';
+            card.style.textAlign = 'left';
+            card.innerHTML = `
+                <div class="card-title">Channel ${i}</div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0;">
+                    <span style="font-size:0.8rem;color:var(--text-dim);">Role</span>
+                    <select id="pyro-role-${i}" onchange="assignPyro(${i}, this.value)" style="background:var(--bg-darker);color:var(--text);border:1px solid #232d38;border-radius:4px;padding:2px 4px;font-size:0.8rem;"></select>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0;">
+                    <span style="font-size:0.8rem;color:var(--text-dim);">Pin</span>
+                    <span class="card-value" id="pyro-pin-${i}" style="font-size:0.85rem;">?</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0;">
+                    <span style="font-size:0.8rem;color:var(--text-dim);">Pulse</span>
+                    <span class="card-value" id="pyro-pulse-${i}" style="font-size:0.85rem;">? ms</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0;">
+                    <span style="font-size:0.8rem;color:var(--text-dim);">Enabled</span>
+                    <input type="checkbox" id="pyro-en-${i}" onchange="togglePyroEnabled(${i}, this.checked)">
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0;">
+                    <span style="font-size:0.8rem;color:var(--text-dim);">State</span>
+                    <span class="card-value" id="pyro-state-${i}" style="font-size:0.85rem;">IDLE</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0;">
+                    <span style="font-size:0.8rem;color:var(--text-dim);">Last fired</span>
+                    <span class="card-value" id="pyro-fired-${i}" style="font-size:0.85rem;">—</span>
+                </div>
+                <button id="pyro-fire-${i}" class="btn-danger" onclick="firePyroCh(${i})" style="margin-top:6px;width:100%;">FIRE</button>
+            `;
+            grid.appendChild(card);
+        }
+        // populate role dropdowns once at build time
+        for (let i = 0; i < 3; i++) {
+            const sel = document.getElementById('pyro-role-' + i);
+            PYRO_ROLES.forEach((r, idx) => {
+                const opt = document.createElement('option');
+                opt.value = idx;
+                opt.text = r;
+                sel.appendChild(opt);
+            });
+        }
+    }
+    buildPyroGrid();
+
+    function updatePyroPanel(d) {
+        if (!d || !d.pyro) return;
+        const armed = d.armed;
+        for (let i = 0; i < 3; i++) {
+            const ch = d.pyro[i];
+            const roleSel  = document.getElementById('pyro-role-' + i);
+            const pinEl    = document.getElementById('pyro-pin-'   + i);
+            const pulseEl  = document.getElementById('pyro-pulse-' + i);
+            const enEl     = document.getElementById('pyro-en-'    + i);
+            const stateEl  = document.getElementById('pyro-state-' + i);
+            const firedEl  = document.getElementById('pyro-fired-' + i);
+            const fireBtn  = document.getElementById('pyro-fire-'   + i);
+
+            if (roleSel.value != String(ch.role)) roleSel.value = ch.role;
+            pinEl.innerText   = (ch.pin === undefined || ch.pin === 999) ? '—' : ch.pin;
+            if (ch.pulse_ms !== undefined) pulseEl.innerText = ch.pulse_ms + ' ms';
+            enEl.checked      = ch.enabled;
+            stateEl.innerText = PYRO_STATE_NAMES[ch.state] || "?";
+            stateEl.style.color = PYRO_STATE_COLORS[ch.state] || "var(--text)";
+            firedEl.innerText = (ch.fired_ms > 0) ? (String(ch.fired_ms) + ' ms') : '—';
+
+            // Role selection locked while armed
+            roleSel.disabled = armed;
+            enEl.disabled    = armed;
+            // Fire button enabled whenever armed (auto-fire still possible in flight)
+            fireBtn.disabled = !armed;
+        }
+        const bk = document.getElementById('pyro-backup-toggle');
+        if (bk) bk.checked = !!d.backup_enabled;
+    }
+
+    function fetchPyroStatus() {
+        fetch('/pyro')
+            .then(r => r.json())
+            .then(d => {
+                // Reuse the same shape as /data pyro block where possible.
+                if (!d.channels) return;
+                const fake = {
+                    armed: !!(d.__armed_hint || false), // hint not present; toggle via /data
+                    pyro: d.channels.map(c => ({
+                        ch: c.ch, role: c.role, state: c.state, fired_ms: c.fired_ms, enabled: c.enabled,
+                        pin: c.pin, pulse_ms: c.pulse_ms
+                    })),
+                    backup_enabled: d.backup_enabled
+                };
+                // We need an "armed" hint; cross-reference via /data is done in updateTelemetry.
+                // For the fire button enabling, fall back to /data's actual armed state kept in a JS global.
+                fake.armed = window.__lastArmed || false;
+                updatePyroPanel(fake);
+            })
+            .catch(() => {});
+    }
+    setInterval(fetchPyroStatus, 600);
+
+    function assignPyro(ch, role) {
+        fetch('/pyro/assign?ch=' + ch + '&role=' + role, {method:'POST'})
+            .then(r => r.text())
+            .then(t => { if (r && !r.ok) alert(t); fetchPyroStatus(); });
+    }
+    function togglePyroEnabled(ch, en) {
+        // No dedicated enabled endpoint — assign/kept in /pyro only exposes role.
+        // Until a dedicated endpoint is added, this UI checkbox reflects state only and is non-editable.
+        document.getElementById('pyro-en-' + ch).checked = !en;
+        alert('Per-channel enable toggle is read-only in this build. Edit pyroChannels[] in main.cpp.');
+    }
+    function firePyroCh(ch) {
+        if (!confirm(`FIRE pyro channel ${ch}? Confirm.`)) return;
+        fetch('/pyro/fire?ch=' + ch, {method:'POST'})
+            .then(r => r.text())
+            .then(t => { fetchPyroStatus(); alert(t); });
+    }
+    function resetPyro() {
+        if (!confirm('Reset all pyro channel states to IDLE? Ground-test only.')) return;
+        fetch('/pyro/reset', {method:'POST'})
+            .then(r => r.text())
+            .then(t => { fetchPyroStatus(); alert(t); });
+    }
+    function toggleBackupChute(en) {
+        // enableBackupChute is now a build-time constant. Checkbox is disabled.
+        alert('enableBackupChute is BUILD-TIME only. Edit globals.h and reflash.');
+    }
+
+    // ---- BROWNOUT RECOVERY ----
+    const RESET_REASON_NAMES = {
+        1: "POWERON",  3: "SW_RESET", 4: "BROWNOUT",
+        5: "BROWNOUT_RT", 14: "PANIC", 15: "INT_WDT", 16: "TASK_WDT",
+        17: "WDT_BROWNOUT", 18: "WDT_BROWNOUT"
+    };
+    function updateBrownoutPanel(d) {
+        if (!d || !d.brownout) return;
+        const b = d.brownout;
+        document.getElementById('bk-boot').innerText  = b.boot_count != null ? b.boot_count : '—';
+        const rrr = RESET_REASON_NAMES[b.reset_reason] || ('#' + (b.reset_reason != null ? b.reset_reason : '?'));
+        document.getElementById('bk-reset').innerText = rrr;
+        const cv = document.getElementById('bk-cache-valid');
+        cv.innerText = b.cache_valid ? 'YES' : 'no';
+        cv.style.color = b.cache_valid ? 'var(--accent-warning)' : 'var(--text-dim)';
+        const bkr = document.getElementById('bk-recovery-toggle');
+        const bkd = document.getElementById('bk-dualwrite-toggle');
+        if (bkr) bkr.checked = !!b.recovery_enabled;
+        if (bkd) bkd.checked = !!b.dual_write_enabled;
+        document.getElementById('bk-resume-status').innerText =
+            b.cache_valid ? 'RESUMED' : 'cold boot';
+    }
+    function toggleBrownoutRecovery(en) {
+        // enableBrownoutRecovery is a build-time constant. Checkbox is disabled.
+        alert('enableBrownoutRecovery is BUILD-TIME only. Edit globals.h and reflash.');
+    }
+    function toggleBrownoutDualWrite(en) {
+        // enableDualWriteCache is a build-time constant. Checkbox is disabled.
+        alert('enableDualWriteCache is BUILD-TIME only. Edit globals.h and reflash.');
+    }
+    function invalidateBrownoutCache() {
+        if (!confirm('Clear cached in-flight snapshot? Next cold boot will NOT resume flight.')) return;
+        fetch('/brownout/invalidate', {method:'POST'})
+            .then(r => r.text())
+            .then(t => alert(t));
+    }
+
+    // ---- BAROMETER CALIBRATION ----
+    function updateBaroPanel(d) {
+        if (!d || !d.baro_cal) return;
+        const b = d.baro_cal;
+        document.getElementById('baro-baseline').innerHTML = (b.baseline != null ? b.baseline.toFixed(1) : '0.0') + '<span class="unit">m</span>';
+        document.getElementById('baro-qnh').innerHTML = (b.qnh != null ? b.qnh.toFixed(2) : '—') + '<span class="unit">hPa</span>';
+        document.getElementById('baro-source').innerText = b.source || 'none';
+        const age = document.getElementById('baro-age');
+        if (b.age_ms == null || b.age_ms < 0) {
+            age.innerText = '—';
+        } else {
+            const s = Math.floor(b.age_ms / 1000);
+            if (s < 3600)      age.innerText = Math.floor(s / 60) + ' min';
+            else if (s < 86400) age.innerText = Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
+            else                age.innerText = Math.floor(s / 86400) + ' d';
+        }
+    }
+    function calibrateBaro() {
+        if (!confirm('Calibrate barometer on the GROUND now? Rocket must be stationary and upright.\nTakes ~2 seconds of sampling.')) return;
+        fetch('/baro/calibrate', {method:'POST'})
+            .then(r => r.text())
+            .then(t => { alert(t); updateTelemetry(); })
+            .catch(() => {});
+    }
+    function invalidateBaroCal() {
+        if (!confirm('Clear stored ground calibration (baseline + QNH)?')) return;
+        fetch('/baro/invalidate', {method:'POST'})
+            .then(r => r.text())
+            .then(t => { alert(t); updateTelemetry(); })
+            .catch(() => {});
+    }
 
     function triggerLaunchSequence() {
         if (!confirm("CONFIRM LAUNCH? This arms the automated sequence!")) return;
