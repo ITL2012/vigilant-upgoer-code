@@ -31,12 +31,11 @@ void playTone(unsigned int freq, unsigned long duration_ms) {
     tone(BUZZER_PIN, freq, duration_ms);
 }
 
-
-void armedAlarm() { 
+void armedAlarm() {
   static unsigned long lastBuzzerAction = 0;
   unsigned long currentMillis = millis();
-  
-  // Total cycle time = 100ms (on time) + 200ms (off time) = 300ms
+
+  // Total cycle time = 300ms (100ms on + 200ms off) — non-blocking
   if (currentMillis - lastBuzzerAction >= 300) {
     playTone(1760, 100); // Plays for 100ms non-blocking
     lastBuzzerAction = currentMillis;
@@ -75,7 +74,7 @@ void recoveryNoise() {
     } else {
       playTone(4000, TONE_DURATION);
     }
-  } 
+  }
   else {
     // The remaining 1500ms of the cycle is absolute silence
     noTone(BUZZER_PIN);
@@ -83,27 +82,122 @@ void recoveryNoise() {
 }
 
 
+// ============================================================================
+// NON-BLOCKING CHIME SEQUENCER
+// ============================================================================
+// Chimes (startup/arm/disarm/mode-change) are multi-note patterns that used to
+// call delay() between notes, blocking the control loop for ~1s. They are now
+// scheduled sequences: the _Chime*() call installs the notes and returns
+// immediately, and the notes play out in the background from buzzerUpdate(),
+// which must be called from loop() each iteration.
+static constexpr int MAX_CHIME_STEPS = 6;
+
+struct ChimeStep {
+    unsigned int  freq;   // Hz
+    unsigned int  onMs;   // how long the note sounds
+    unsigned int  gapMs;  // silence before the next note (or end)
+};
+
+static ChimeStep chimeSeq[MAX_CHIME_STEPS];
+static int      chimeCount    = 0;
+static int      chimeIndex    = 0;
+static bool     chimeActive   = false;
+static bool     chimeSounding = false;  // true = playing, false = in gap
+static unsigned long chimePhaseStart = 0;
+
+static void chimeStart(const ChimeStep steps[], int count) {
+    if (enableBuzzer != true) return;
+    initBuzzerLEDC();
+    if (count > MAX_CHIME_STEPS) count = MAX_CHIME_STEPS;
+    for (int i = 0; i < count; i++) chimeSeq[i] = steps[i];
+    chimeCount    = count;
+    chimeIndex    = 0;
+    chimeSounding = true;
+    chimeActive   = true;
+    chimePhaseStart = millis();
+    tone(BUZZER_PIN, chimeSeq[0].freq);   // start first note immediately
+}
+
+// Called once per loop() iteration. Advances the active chime through its
+// notes/gaps with millis() timing only — never blocks.
+void buzzerUpdate() {
+    if (enableBuzzer != true) return;
+    if (!chimeActive) return;
+
+    unsigned long now = millis();
+    const ChimeStep &s = chimeSeq[chimeIndex];
+
+    if (chimeSounding) {
+        // Note's sound window elapsed — silence (or end of sequence).
+        if (now - chimePhaseStart >= s.onMs) {
+            noTone(BUZZER_PIN);
+            if (chimeIndex == chimeCount - 1 && s.gapMs == 0) {
+                chimeActive = false;
+                return;
+            }
+            chimeSounding  = false;
+            chimePhaseStart = now;
+        }
+    } else {
+        // Silence gap elapsed — advance to the next note.
+        if (now - chimePhaseStart >= (unsigned long)s.gapMs) {
+            chimeIndex++;
+            if (chimeIndex >= chimeCount) {
+                chimeActive = false;
+                return;
+            }
+            chimeSounding  = true;
+            chimePhaseStart = now;
+            tone(BUZZER_PIN, chimeSeq[chimeIndex].freq);
+        }
+    }
+}
+
+// All chimes below are non-blocking: they schedule their note pattern and
+// return immediately. The audible result is identical to the old delay()-based
+// versions (same frequencies/durations/silences).
 
 void startupChime() {
-    playTone(523, 100); delay(120);
-    playTone(659, 100); delay(120);
-    playTone(784, 150); delay(180);
-    playTone(1047, 200); delay(250);
+    static const ChimeStep steps[] = {
+        {523,  100, 20},
+        {659,  100, 20},
+        {784,  150, 30},
+        {1047, 220, 30},
+    };
+    chimeStart(steps, 4);
 }
 
 void errorBeep() {
-    playTone(200, 1000);
+    static const ChimeStep steps[] = {
+        {200, 1000, 0},
+    };
+    chimeStart(steps, 1);
 }
 
 void armChime() {
-    playTone(880, 150); delay(180);
-    playTone(880, 150); delay(180);
-    playTone(1760, 400); delay(450);
+    static const ChimeStep steps[] = {
+        {880,  150, 30},
+        {880,  150, 30},
+        {1760, 400, 50},
+    };
+    chimeStart(steps, 3);
 }
 
 void disarmChime() {
-    playTone(1760, 150); delay(180);
-    playTone(880, 300); delay(350);
+    static const ChimeStep steps[] = {
+        {1760, 150, 30},
+        {880,  300, 50},
+    };
+    chimeStart(steps, 2);
+}
+
+void modeChangeChime() {
+    static const ChimeStep steps[] = {
+        {587,  80, 20},
+        {880,  80, 20},
+        {1175, 150, 30},
+    };
+    chimeStart(steps, 3);
 }
 
 // RECOVERY beacon - call once to start, then call recoveryNoise() each loop
@@ -125,11 +219,5 @@ void recoveryBeaconUpdate() {
     if (recoveryBeaconActive) {
         recoveryNoise();
     }
-}
-
-void modeChangeChime() {
-    playTone(587, 80); delay(100);
-    playTone(880, 80); delay(100);
-    playTone(1175, 150); delay(180);
 }
 #endif // BUZZERS_H

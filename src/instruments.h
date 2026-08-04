@@ -199,7 +199,11 @@ void baroCalibrationSampleAndCompute(BaroCalibration &out) {
 void applyBaroCalibration(const BaroCalibration &c) {
     baseline_altitude = c.baseline_altitude;
     qnh_pressure      = c.qnh_pressure;
-    previous_altitude = baseline_altitude;
+    // previous_altitude holds the LAST RELATIVE baro sample (see readBaroAltitude),
+    // not the absolute ground baseline. Seeding it with baseline_altitude instead
+    // of 0.0 produced a giant V_baro spike (~baseline/dt) on the first fusion
+    // frame, dragging V_z negative and biasing filter_alt ~100m on the pad.
+    previous_altitude = 0.0f;
 }
 
 // Persist to NVS. Always-on — writes happen only on explicit calibration.

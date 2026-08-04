@@ -115,7 +115,13 @@ const char *baroCalSource = "none";
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+
+    // Fast mid-flight-resume detector — RTC slow-memory only (microseconds,
+    // no flash/SD/wire traffic). If a brownout / panic reset happened during
+    // flight, skip the 1s power-settle delay so the critical sensors and the
+    // restored flight state come up almost immediately.
+    const bool expedited = flightCacheExpediteBoot();
+    if (!expedited) delay(1000);
 
     initLogCache();
 
@@ -165,6 +171,69 @@ void setup() {
             delay(100);
         }
     }
+
+    // True if a cached in-flight snapshot was applied during this boot. Used in
+    // the shared boot footer below for both the expedited and normal paths.
+    bool resumedInFlight = false;
+
+    if (expedited) {
+        // ===================== EXPEDITED MID-FLIGHT RESUME =====================
+        // Skipped vs. normal boot: 1s power settle, 100ms SPI settle, 100ms I2C
+        // settle, 200ms GPS settle, 500ms task-bootstrap delay, SD mount, GPS
+        // serial + WiFi bring-up. Critical path is only: SPI -> IMU/baro ->
+        // baro-cal restore -> PWM/servos -> PIDs. The cached flight state is
+        // applied by the shared BROWNOUT RECOVERY block just below, before the
+        // first loop() iteration. Everything else finishes in DeferredInitTask
+        // at low priority in the background.
+        write(LOG_BOTH, LOG_WARN, "[BOOT] EXPEDITED — mid-flight resume detected, fast init");
+        esp_task_wdt_reset();
+
+        // ---- SPI + critical instruments (BNO085 IMU, BMP580 baro) ----
+        write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing sensors...");
+        SPI.begin(VSPI_CLK, VSPI_MISO, VSPI_MOSI);
+        initInstruments();
+        checkInstruments();
+
+        // ---- BAROMETER CALIBRATION RESTORE (always-on) ----
+        // Must run before any telemetry/fusion so filter_alt / QNH are valid.
+        baroCalibrationRestoreOnBoot();
+
+        // ---- I2C + PWM/servo init (needed for active control) ----
+        Wire.begin(I2C_SDA, I2C_SCL);
+        Wire.setClock(I2C_SPEED);
+
+        pwm.begin();
+        pwm.setPWMFreq(50);
+        // Mid-flight resume: seed the servos with the last-commanded angles
+        // from the RTC cache (no 90° "death jerk"), if we have a valid
+        // in-flight snapshot to restore from.
+        float seedServo[8];
+        if (peekCachedServoAngles(seedServo)) {
+            UserSpace::initServos(true, seedServo);
+        } else {
+            UserSpace::initServos(true, nullptr);   // cache stale/missing — center neutrally
+        }
+
+        // ---- Flight-control PIDs ----
+        write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing stabilization PIDs...");
+        initStabilizationPIDs(true);
+        airspeedFilter.init();
+
+        // ---- Tasks: telemetry now, the rest deferred ----
+        if (xTaskCreatePinnedToCore(
+            TelemetryTask, "GPS_Telemetry_Task", 4096, NULL, 2,
+            &telemetryTaskHandle, 0) != pdPASS) {
+            write(LOG_BOTH, LOG_ERROR, "[FAIL] Telemetry task create");
+        }
+        if (xTaskCreatePinnedToCore(
+            DeferredInitTask, "Deferred_Init_Task", 4096, NULL, 1,
+            NULL, 0) != pdPASS) {
+            write(LOG_BOTH, LOG_ERROR, "[FAIL] Deferred init task create");
+        }
+        esp_task_wdt_reset();
+
+    } else {
+    #pragma region Initialization
 
     // ---- SPI Bus Initialization (VSPI for BNO085, BMP580) ----
     write(LOG_BOTH, LOG_INFO, "[BOOT] Initializing SPI bus...");
@@ -288,12 +357,15 @@ void setup() {
     delay(500); // Give tasks time to start
 
     #pragma endregion
+    } // else (normal boot) — expedited boot ended above
 
     // ---- BROWNOUT RECOVERY — apply cached in-flight state (if recent) ----
     // Done after all subsystems are up so telemetry / servos / SD logging
-    // resume immediately alongside the restored phase. If this returns true,
-    // we skip the "READY FOR OPERATION" boot-complete posture and continue flying.
-    bool resumedInFlight = flightCacheLoadAndApply();
+    // resume immediately alongside the restored phase. On an expedited boot
+    // this restores the cached flight before the first loop() iteration. If
+    // this returns true, we skip the "READY FOR OPERATION" boot-complete
+    // posture and continue flying.
+    resumedInFlight = flightCacheLoadAndApply();
     if (resumedInFlight) {
         write(LOG_BOTH, LOG_WARN,
               "[BROWNOUT] Flight resumed from cached snapshot. Continuing phase=%u.",
@@ -343,6 +415,12 @@ void loop() {
     if (phase == RECOVERY) {
         recoveryBeaconUpdate();
     }
+
+    // Advance any scheduled (non-blocking) chime sequence
+    buzzerUpdate();
+
+    // De-energize any fired pyro pin after its configured pulse duration
+    pyroPulseMaintain();
 
     // Determine logging interval based on mode/phase
     int logIntervalMs = 1000; // default 1 Hz for TRANSPORT, PAD, RECOVERY

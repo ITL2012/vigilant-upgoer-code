@@ -22,21 +22,36 @@ int enable5v(bool onOff = true) {
     }
 }
 
-void firePyro(int pyroPin, int pulseDurationMs) {
-    static uint32_t startTimes[70] = {0};
-    static bool isPinActive[70] = {false};
+// Pyro pulse state. Shared between firePyro() (starts a pulse) and
+// pyroPulseMaintain() (cuts the pin after pulseDurationMs). Indexed by GPIO.
+static uint32_t pyroPinStartMs[70] = {0};
+static uint32_t pyroPinDurMs[70]   = {0};
+static bool     pyroPinActive[70]  = {false};
 
+void firePyro(int pyroPin, int pulseDurationMs) {
     if (pyroPin < 0 || pyroPin >= 70) return;
 
-    if (!isPinActive[pyroPin]) {
+    if (!pyroPinActive[pyroPin]) {
         pinMode(pyroPin, OUTPUT);
         digitalWrite(pyroPin, HIGH);
-        startTimes[pyroPin] = millis();
-        isPinActive[pyroPin] = true;
-    } else {
-        if (millis() - startTimes[pyroPin] >= (uint32_t)pulseDurationMs) {
-            digitalWrite(pyroPin, LOW);
-            isPinActive[pyroPin] = false;
+        pyroPinStartMs[pyroPin] = millis();
+        pyroPinDurMs[pyroPin]   = (uint32_t)pulseDurationMs;
+        pyroPinActive[pyroPin]  = true;
+    }
+}
+
+// Non-blocking pulse supervisor. Call once per loop() iteration. De-energizes
+// any active pyro pin once its pulse duration has elapsed. (The old code only
+// pulled the pin LOW when firePyro() happened to be re-invoked on the same
+// active pin — which never occurred on the flight path — so a fired channel's
+// igniter would stay energized indefinitely.)
+void pyroPulseMaintain() {
+    uint32_t now = millis();
+    for (int i = 0; i < 70; i++) {
+        if (!pyroPinActive[i]) continue;
+        if (now - pyroPinStartMs[i] >= pyroPinDurMs[i]) {
+            digitalWrite(i, LOW);
+            pyroPinActive[i] = false;
         }
     }
 }

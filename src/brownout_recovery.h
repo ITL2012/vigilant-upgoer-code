@@ -17,6 +17,7 @@
 
 #include "globals.h"
 #include "Launchsequence.h"
+#include "guidance_flight_control.h"   // pid[] + MAX_DEFLECTION_DEG for clamp
 #include <Preferences.h>
 #include <SD_MMC.h>
 #include <esp_system.h>
@@ -89,6 +90,9 @@ static FlightCache buildSnapshot() {
     c.max_altitude     = ::max_altitude;
     c.baseline_altitude = baseline_altitude;
     c.qnh_pressure      = qnh_pressure;
+
+    extern float latestServoAngles[8];
+    memcpy(c.servoAngles, latestServoAngles, sizeof(c.servoAngles));
 
     for (int i = 0; i < 3; i++) {
         c.pyroStateArr[i]  = (uint8_t)pyroState[i].state;
@@ -197,9 +201,20 @@ void flightCacheRestorePID(const FlightCache &c) {
     // QuickPID exposes SetOutputSum() which corresponds to the integral
     // accumulator (outputSum is public + has a setter). pTerm/iTerm/dTerm
     // themselves are private and Reset() on next Compute() anyway, so we
-    // restore via the public path.
+    // restore via the public path — and clamp the seeded accumulators to the
+    // control output range so a corrupt/stale sum can't wind the servos
+    // straight to the hard stop on the first loop after a mid-flight resume.
+    extern float latestServoAngles[8];
+    memcpy(latestServoAngles, c.servoAngles, sizeof(c.servoAngles));
+
     for (size_t i = 0; i < BROWNOUT_NUM_PID; i++) {
-        pid[i].SetOutputSum(c.pid_iTerm[i]);
+        float clamped = constrain(c.pid_iTerm[i], -MAX_DEFLECTION_DEG, MAX_DEFLECTION_DEG);
+        if (fabsf(clamped - c.pid_iTerm[i]) > 0.001f) {
+            write(LOG_BOTH, LOG_WARN,
+                  "[BROWNOUT] PID %u outputSum %.2f clamped to %.2f",
+                  (unsigned)i, c.pid_iTerm[i], clamped);
+        }
+        pid[i].SetOutputSum(clamped);
     }
 }
 
@@ -227,6 +242,54 @@ static unsigned long snapshotAgeMs(const FlightCache &c) {
     }
     uint64_t nowEpoch = baseEp + (millis() - baseMs);
     return (unsigned long)(nowEpoch - c.snapshotEpoch_ms);
+}
+
+// Fast mid-flight-reset detector — RTC slow-memory ONLY (microseconds, no
+// flash/SD/wire traffic). Called first thing in setup(), BEFORE any hardware
+// init, to decide whether to skip the power-settle delays and boot directly
+// into resume. Returns true only when a valid in-flight snapshot exists on
+// the always-kept RTC cache (which itself lives across brownouts/soft resets).
+//
+// NVS/SD are deliberately NOT touched here (flash wear + latency). The
+// authoritative check still runs later via flightCacheLoadAndApply(), so we
+// only risk an unnecessary "fast boot" (harmless — non-critical subsystems
+// come up from DeferredInitTask in the background).
+static bool flightCacheExpediteBoot() {
+    if (!enableBrownoutRecovery) return false;
+    if (rtcCache.magic    != BROWNOUT_CACHE_MAGIC ||
+        rtcCache.version  != BROWNOUT_CACHE_VERSION) return false;
+    if (!snapshotIsInFlight(rtcCache)) return false;
+
+    // Staleness guard: only meaningful if the operator had synced the wall
+    // clock (systemBaseEpochMs) — at boot the RAM copy is 0, so this matches
+    // snapshotAgeMs() and treats RTC-continuous resumes as "fresh". The 60s
+    // window still gets enforced by flightCacheLoadAndApply().
+    extern std::atomic<unsigned long long> systemBaseEpochMs;
+    extern std::atomic<unsigned long>       systemBaseMillis;
+    unsigned long long baseEp = systemBaseEpochMs.load(std::memory_order_relaxed);
+    unsigned long      baseMs = systemBaseMillis.load(std::memory_order_relaxed);
+    if (baseEp > 0 && rtcCache.snapshotEpoch_ms != 0) {
+        uint64_t nowEpoch = baseEp + (millis() - baseMs);
+        if ((nowEpoch > rtcCache.snapshotEpoch_ms) &&
+            (nowEpoch - rtcCache.snapshotEpoch_ms) >
+                (uint64_t)(BROWNOUT_CACHE_VALIDITY_S * 1000ULL)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Peek the last-commanded servo angles straight from the RTC cache (RTC slow
+// memory only — microseconds, no flash/SD, safe before any hardware init).
+// Used by initServos() on the expedited-resume path so the fins are driven to
+// where they were before the reset instead of a hardcoded center value.
+// Returns false if no valid in-flight snapshot exists to seed from.
+static bool peekCachedServoAngles(float (&out)[8]) {
+    if (rtcCache.magic   != BROWNOUT_CACHE_MAGIC ||
+        rtcCache.version != BROWNOUT_CACHE_VERSION) return false;
+    if (!snapshotIsInFlight(rtcCache)) return false;
+    memcpy(out, rtcCache.servoAngles, sizeof(float[8]));
+    return true;
 }
 
 bool flightCacheLoadAndApply() {

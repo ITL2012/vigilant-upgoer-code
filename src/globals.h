@@ -130,7 +130,7 @@ extern float max_altitude;
 
 static constexpr unsigned long BROWNOUT_CACHE_VALIDITY_S = 60;  // seconds
 static constexpr uint32_t       BROWNOUT_CACHE_MAGIC        = 0xB04C1A57;  // "BO-CAST" magic
-static constexpr uint32_t       BROWNOUT_CACHE_VERSION      = 1;
+static constexpr uint32_t       BROWNOUT_CACHE_VERSION      = 2;  // +1 when FlightCache schema changes
 static constexpr size_t         BROWNOUT_NUM_PID             = 8;
 
 struct FlightCache {
@@ -153,6 +153,10 @@ struct FlightCache {
     float    max_altitude;
     float    baseline_altitude; // ground ref restored
     float    qnh_pressure;       // sea-level pressure reference (was missing — bug fix)
+
+    // Servo/actuator last-commanded angles — so an expedited mid-flight resume
+    // drives the fins to where they were rather than snapping to center (90°).
+    float    servoAngles[8];
 
     // Pyro
     uint8_t  pyroStateArr[3];   // PyroState per channel

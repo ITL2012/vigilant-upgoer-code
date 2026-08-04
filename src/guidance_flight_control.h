@@ -81,10 +81,19 @@ namespace UserSpace {
         pwm.setPWM(servos[index].channel, 0, pulseTicks);
     }
 
-    void initServos() {
-        write(LOG_BOTH, LOG_INFO, "[SERVOS] Centering all 8 control surfaces to 90.0 deg");
-        for (int i = 0; i < NUM_SERVOS; i++) {
-            writeServoAngle(i, SERVO_CENTER_DEG);
+    void initServos(bool expedited = false, const float *seedAngles = nullptr) {
+        if (expedited && seedAngles != nullptr) {
+            // Mid-flight resume: don't snap the fins to a hardcoded center —
+            // restore the last-commanded angles so control is continuous.
+            write(LOG_BOTH, LOG_WARN, "[SERVOS] Expedited resume — restoring 8 servo angle(s) from cache");
+            for (int i = 0; i < NUM_SERVOS; i++) {
+                writeServoAngle(i, seedAngles[i]);
+            }
+        } else {
+            write(LOG_BOTH, LOG_INFO, "[SERVOS] Centering all 8 control surfaces to 90.0 deg");
+            for (int i = 0; i < NUM_SERVOS; i++) {
+                writeServoAngle(i, SERVO_CENTER_DEG);
+            }
         }
     }
 }
@@ -147,10 +156,19 @@ QuickPID pid[NUM_PIDS] = {
     QuickPID(&pidInput[7], &pidOutput[7], &pidSetpoint[7], gainSchedule[0].kp, gainSchedule[0].ki, gainSchedule[0].kd, QuickPID::Action::direct),
 };
 
-void initStabilizationPIDs() {
+void initStabilizationPIDs(bool expedited = false) {
     for (int i = 0; i < NUM_PIDS; i++) {
         pid[i].SetMode(QuickPID::Control::automatic);
         pid[i].SetOutputLimits(-MAX_DEFLECTION_DEG, MAX_DEFLECTION_DEG);
+        if (expedited) {
+            // Mid-flight resume windup guard: SetMode(automatic) seeds
+            // outputSum from pidOutput[] (which is 0), so start the integral
+            // path at a neutral value. flightCacheRestorePID() re-seeds each
+            // accumulator with the last-known-good sum right after this (and
+            // clamps it). This prevents a Ki windup blast if the cache turns
+            // out to be unavailable/stale.
+            pid[i].SetOutputSum(0.0f);
+        }
     }
 }
 
@@ -376,7 +394,7 @@ void process_flight_state_machine(float raw_accel_z, float filter_alt) {
             if (millis() - liftoff_time_ms.load(std::memory_order_relaxed) >= APOGEE_BACKUP_TIMEOUT_MS) {
                 if (apogee_counter < APOGEE_BUFFER_SIZE) {
                     apogee_counter = APOGEE_BUFFER_SIZE;
-                    write(LOG_BOTH, LOG_WARN, "[APOGEE] Backup timer expired (%n)", APOGEE_BACKUP_TIMEOUT_MS);
+                    write(LOG_BOTH, LOG_WARN, "[APOGEE] Backup timer expired (%lu ms)", APOGEE_BACKUP_TIMEOUT_MS);
                 }
             }
 

@@ -12,6 +12,16 @@
 // Forward declarations for externs defined in main.cpp
 extern HardwareSerial gpsSerial;
 extern QueueHandle_t sdLogQueue;
+extern TaskHandle_t  sdWriterTaskHandle;
+extern TaskHandle_t  wifiServerTaskHandle;
+
+// Task-startup tasks come from web_server.h (included by main.cpp after this
+// header); declare it here so DeferredInitTask can refer to it.
+void WifiServerTask(void *pvParameters);
+
+// Set true once non-critical subsystems (GPS/SD/WiFi) have finished coming up
+// in the background during an expedited mid-flight-resume boot.
+std::atomic<bool> deferredInitDone(false);
 
 // SD-fallback dual-write mirror. Only used when enableDualWriteCache is true.
 // Writes the most recent log packets to a rotating NVS ring (16 slots).
@@ -431,6 +441,72 @@ void SDWriterTask(void *pvParameters) {
 
         // Periodic flush + watchdog
         esp_task_wdt_reset();
+    }
+}
+
+// ============================================================================
+// DeferredInitTask — background completion of non-critical subsystems after an
+// expedited mid-flight-resume boot.
+// ============================================================================
+// During a fast resume only the critical flight hardware (IMU/baro + servos)
+// is brought up in setup() so control resumes almost immediately. This task,
+// pinned to the same core as the other I/O tasks but at low priority, brings
+// up GPS, SD logging and the WiFi/GCS server afterwards. It feeds the WDT
+// across the blocking SD mount (which can take hundreds of ms).
+void DeferredInitTask(void *pvParameters) {
+    (void) pvParameters;
+    esp_task_wdt_add(NULL);
+
+    // ---- GPS (non-blocking) ----
+    write(LOG_BOTH, LOG_INFO, "[DEFERRED] Starting GPS serial...");
+    gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX2, GPS_TX2);
+    vTaskDelay(pdMS_TO_TICKS(200));   // let the module charge its UART
+    esp_task_wdt_reset();
+    if (gpsSerial) {
+        write(LOG_BOTH, LOG_INFO, "[DEFERRED] GPS communication open at %d baud", GPS_BAUD);
+    } else {
+        write(LOG_BOTH, LOG_WARN, "[DEFERRED] GPS serial port not available");
+    }
+
+    // ---- SD card (blocking) ----
+    write(LOG_BOTH, LOG_INFO, "[DEFERRED] Initializing SD card...");
+    esp_task_wdt_reset();
+    SDInit();
+    esp_task_wdt_reset();
+    if (sdReady) {
+        write(LOG_BOTH, LOG_INFO, "[DEFERRED] SD card ready — flushing boot log");
+        flushLogCacheToSD();
+        if (xTaskCreatePinnedToCore(
+            SDWriterTask, "SD_Logging_Task", 4096, NULL, 1,
+            &sdWriterTaskHandle, 0) != pdPASS) {
+            write(LOG_BOTH, LOG_ERROR, "[DEFERRED] Failed to create SD task!");
+        } else {
+            write(LOG_BOTH, LOG_INFO, "[DEFERRED] SD logging task created");
+        }
+    } else {
+        write(LOG_BOTH, LOG_WARN, "[DEFERRED] SD card unavailable - logging disabled");
+        sdWriterTaskHandle = NULL;
+    }
+    esp_task_wdt_reset();
+
+    // ---- WiFi / GCS server ----
+    write(LOG_BOTH, LOG_INFO, "[DEFERRED] Starting WiFi server...");
+    if (xTaskCreatePinnedToCore(
+        WifiServerTask, "GCS_Wifi_Server", 8192, NULL, 1,
+        &wifiServerTaskHandle, 0) != pdPASS) {
+        write(LOG_BOTH, LOG_ERROR, "[DEFERRED] Failed to create WiFi task!");
+    } else {
+        write(LOG_BOTH, LOG_INFO, "[DEFERRED] WiFi server task created");
+    }
+    esp_task_wdt_reset();
+
+    deferredInitDone.store(true, std::memory_order_relaxed);
+    write(LOG_BOTH, LOG_INFO, "[DEFERRED] Background init complete");
+
+    // Keep the task alive (stack is tiny) and feed its WDT subscription.
+    for (;;) {
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 
