@@ -11,6 +11,7 @@
 #include <FS.h>
 #include <esp_task_wdt.h>
 #include "index.html"
+#include <LittleFS.h>
 #include <ElegantOTA.h>
 
 WebServer* serverPtr = nullptr;
@@ -303,6 +304,22 @@ void handleDisarm() {
 
 void handleRoot() {
     serverPtr->send_P(200, "text/html", INDEX_HTML);
+}
+
+void handleThreeJS() {
+    if (!LittleFS.exists("/three.min.js.gz")) {
+        serverPtr->send(404, "text/plain", "three.min.js not found on LittleFS (run 'pio run -t uploadfs')");
+        return;
+    }
+    File f = LittleFS.open("/three.min.js.gz", FILE_READ);
+    if (!f) {
+        serverPtr->send(500, "text/plain", "failed to open three.min.js.gz");
+        return;
+    }
+    serverPtr->sendHeader("Content-Encoding", "gzip");
+    serverPtr->sendHeader("Cache-Control", "max-age=86400");
+    serverPtr->streamFile(f, "application/javascript; charset=utf-8");
+    f.close();
 }
 
 void handleSetSystemMode() {
@@ -799,6 +816,7 @@ void handleBaroInvalidate() {
 
 void registerFullRoutes() {
     serverPtr->on("/", HTTP_GET, handleRoot);
+    serverPtr->on("/three.min.js", HTTP_GET, handleThreeJS);
     serverPtr->on("/data", HTTP_GET, handleGetData);
     serverPtr->on("/set_time", HTTP_GET, handleSetTime);
     serverPtr->on("/arm", HTTP_POST, handleArm);
@@ -883,6 +901,12 @@ void WifiServerTask(void *pvParameters) {
     Serial.println(AP_SSID);
     Serial.print("[WIFI] GCS Dashboard IP: ");
     Serial.println(IP);
+
+    if (LittleFS.begin()) {
+        Serial.println("[WIFI] LittleFS mounted");
+    } else {
+        Serial.println("[WIFI] WARNING: LittleFS mount failed — static assets (three.js) unavailable");
+    }
 
     serverPtr = new WebServer(80);
     registerFullRoutes();
